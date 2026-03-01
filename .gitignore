@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Temporary files and logs
+tsc_*.txt
+vite_*.txt
+errors.txt
+DigRifa/
