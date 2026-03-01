@@ -1,7 +1,49 @@
-import React from 'react';
-import { Link } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
+import { supabase } from '../lib/supabaseClient';
 
 export default function Profile() {
+  const { user, signOut } = useAuth();
+  const navigate = useNavigate();
+  const [profileData, setProfileData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function fetchProfile() {
+      if (!user) return;
+      try {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', user.id)
+          .single();
+
+        if (error) {
+          console.error('Error fetching profile:', error);
+        } else {
+          setProfileData(data);
+        }
+      } catch (err) {
+        console.error('Error:', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchProfile();
+  }, [user]);
+
+  const handleSignOut = async () => {
+    await signOut();
+    navigate('/login');
+  };
+
+  const displayName = profileData?.full_name || user?.email?.split('@')[0] || 'Usuário';
+  const displayEmail = user?.email || 'Email não disponível';
+  const displayPhone = profileData?.phone || 'Não informado';
+  const displayCpf = profileData?.cpf || 'Não informado';
+  const displayAvatar = profileData?.avatar_url || `https://ui-avatars.com/api/?name=${displayName}&background=6366F1&color=fff`;
+
   return (
     <div className="bg-[#F9FAFB] dark:bg-[#0F0F0F] text-slate-900 dark:text-slate-100 min-h-screen pb-24 font-sans">
       <header className="sticky top-0 z-50 bg-[#F9FAFB]/80 dark:bg-[#0F0F0F]/80 backdrop-blur-xl px-6 py-4 flex items-center justify-between border-b border-slate-200 dark:border-white/10">
@@ -28,7 +70,7 @@ export default function Profile() {
             <img 
               alt="Profile Picture" 
               className="w-20 h-20 rounded-2xl object-cover ring-2 ring-[#6366F1]/20" 
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuD6SJHdsPhKj8_L1JsU25Inph774gtAXYtUl668RoIT0B9x5e0cP96SVLYWO1aK171ylpwoqO0wYmprJxtPL0ebvMEfOeVe0t9dWHO55uYBfByLTpJd6qj_YSm12TZA7vKGbiAg6MwoW3cHXfbL3iqUYCR3r_0Z5iFhYo0DPxMqk6KKmH9EqvVGf_bDFLqpWYu9d-CWiVUfVWHxiY0SxJeUogYNPFqXHFDGXF1i645ToMwSr8I-fUNFyNzmxohc_rLasrSi48tjmLk" 
+              src={displayAvatar} 
               referrerPolicy="no-referrer"
             />
             <div className="absolute -bottom-1 -right-1 bg-[#6366F1] text-white p-1.5 rounded-lg shadow-lg">
@@ -36,8 +78,8 @@ export default function Profile() {
             </div>
           </div>
           <div>
-            <h2 className="text-xl font-bold">Jérime Rêgo</h2>
-            <p className="text-sm text-slate-500 dark:text-slate-400">jerime.rego@gmail.com</p>
+            <h2 className="text-xl font-bold">{loading ? 'Carregando...' : displayName}</h2>
+            <p className="text-sm text-slate-500 dark:text-slate-400">{displayEmail}</p>
           </div>
         </div>
 
@@ -51,19 +93,19 @@ export default function Profile() {
           <div className="grid grid-cols-2 gap-y-6 gap-x-4">
             <div>
               <label className="block text-xs font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-1">Nome</label>
-              <p className="text-sm font-medium">Jérime Rêgo</p>
+              <p className="text-sm font-medium">{loading ? '...' : displayName}</p>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-1">Email</label>
-              <p className="text-sm font-medium truncate">jerime.rego@gmail.com</p>
+              <p className="text-sm font-medium truncate">{loading ? '...' : displayEmail}</p>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-1">Cpf</label>
-              <p className="text-sm font-medium text-slate-400 dark:text-slate-600 italic">Não informado</p>
+              <p className="text-sm font-medium text-slate-400 dark:text-slate-600 italic">{loading ? '...' : displayCpf}</p>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-1">Telefone</label>
-              <p className="text-sm font-medium">+55 (88) 99999-9999</p>
+              <p className="text-sm font-medium">{loading ? '...' : displayPhone}</p>
             </div>
           </div>
         </section>
@@ -95,10 +137,13 @@ export default function Profile() {
           </button>
         </section>
 
-        <Link to="/login" className="w-full flex items-center justify-center gap-2 py-4 text-red-500 font-medium text-sm">
+        <button 
+          onClick={handleSignOut}
+          className="w-full flex items-center justify-center gap-2 py-4 text-red-500 font-medium text-sm hover:bg-red-50 dark:hover:bg-red-900/10 rounded-xl transition-colors"
+        >
           <span className="material-icons-round text-base">logout</span>
           Sair do aplicativo
-        </Link>
+        </button>
       </main>
 
       <nav className="fixed bottom-0 left-0 right-0 bg-white/80 dark:bg-[#1A1A1A]/80 backdrop-blur-xl border-t border-slate-200 dark:border-white/10 px-6 pb-8 pt-3 flex justify-between items-center z-50">

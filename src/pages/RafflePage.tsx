@@ -152,7 +152,7 @@ export default function RafflePage() {
           // Prioridade: WhatsApp de Suporte > Telefone do Perfil > Fallback
           const supportPhone = socialNetworks?.whatsappSupport;
           const profilePhone = organizerPhone;
-          const fallbackPhone = '5511999999999';
+          const fallbackPhone = import.meta.env.VITE_SUPPORT_PHONE || '5511999999999';
           
           // Função para extrair apenas o número de links do WhatsApp ou limpar formatação
           const extractPhone = (val: string) => {

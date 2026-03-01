@@ -1,5 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider } from './context/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
 import { CampaignProvider } from './context/CampaignContext';
 import { PaymentProvider } from './context/PaymentContext';
 import { ThemeProvider } from './context/ThemeContext';
@@ -20,33 +22,84 @@ import SocialNetworks from './pages/Social';
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <PaymentProvider>
-        <SocialNetworkProvider>
-          <CampaignProvider>
-            <BrowserRouter>
-              <Routes>
-                <Route path="/" element={<Navigate to="/login" replace />} />
-                <Route path="/login" element={<Login />} />
-                <Route path="/profile" element={<Profile />} />
-                <Route path="/dashboard" element={<CampaignDashboard />} />
-                <Route path="/pix" element={<PaymentMethods />} />
-                <Route path="/social" element={<SocialNetworks />} />
-                <Route path="/customize" element={<CustomizeRaffles />} />
-                {/* Route updated */}
-                <Route path="/campaigns/new" element={<NewCampaign />} />
-                <Route path="/campaigns/:id/setup" element={<NewCampaign />} />
-                <Route path="/campaigns/:id/manage" element={<CampaignManager />} />
-                <Route path="/campaigns/:id/edit" element={<CampaignEditGeneral />} />
-                <Route path="/campaigns/:id/media" element={<CampaignEditMedia />} />
-                <Route path="/campaigns/:id/prizes" element={<CampaignEditPrizes />} />
-                <Route path="/rifas/:slug" element={<RafflePage />} />
-                <Route path="/r/:id" element={<RedirectToRaffle />} />
-              </Routes>
-            </BrowserRouter>
-          </CampaignProvider>
-        </SocialNetworkProvider>
-      </PaymentProvider>
-    </ThemeProvider>
+    <AuthProvider>
+      <ThemeProvider>
+        <PaymentProvider>
+          <SocialNetworkProvider>
+            <CampaignProvider>
+              <BrowserRouter>
+                <Routes>
+                  <Route path="/" element={<Navigate to="/login" replace />} />
+                  <Route path="/login" element={<Login />} />
+                  
+                  {/* Protected Routes */}
+                  <Route path="/profile" element={
+                    <ProtectedRoute>
+                      <Profile />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/dashboard" element={
+                    <ProtectedRoute>
+                      <CampaignDashboard />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/pix" element={
+                    <ProtectedRoute>
+                      <PaymentMethods />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/social" element={
+                    <ProtectedRoute>
+                      <SocialNetworks />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/customize" element={
+                    <ProtectedRoute>
+                      <CustomizeRaffles />
+                    </ProtectedRoute>
+                  } />
+                  
+                  {/* Campaign Routes (Protected) */}
+                  <Route path="/campaigns/new" element={
+                    <ProtectedRoute>
+                      <NewCampaign />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/campaigns/:id/setup" element={
+                    <ProtectedRoute>
+                      <NewCampaign />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/campaigns/:id/manage" element={
+                    <ProtectedRoute>
+                      <CampaignManager />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/campaigns/:id/edit" element={
+                    <ProtectedRoute>
+                      <CampaignEditGeneral />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/campaigns/:id/media" element={
+                    <ProtectedRoute>
+                      <CampaignEditMedia />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/campaigns/:id/prizes" element={
+                    <ProtectedRoute>
+                      <CampaignEditPrizes />
+                    </ProtectedRoute>
+                  } />
+
+                  {/* Public Routes */}
+                  <Route path="/rifas/:slug" element={<RafflePage />} />
+                  <Route path="/r/:id" element={<RedirectToRaffle />} />
+                </Routes>
+              </BrowserRouter>
+            </CampaignProvider>
+          </SocialNetworkProvider>
+        </PaymentProvider>
+      </ThemeProvider>
+    </AuthProvider>
   );
 }
