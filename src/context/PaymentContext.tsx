@@ -6,11 +6,22 @@ interface PixManualConfig {
     pixKey: string;
     accountHolder: string;
     isConfigured: boolean;
+    isActive: boolean; // Added isActive to control manual pix visibility
+}
+
+export interface N8NConfig {
+    createUrl: string;
+    checkUrl: string;
+    isActive: boolean;
 }
 
 interface PaymentContextType {
     pixManual: PixManualConfig;
     setPixManual: (config: PixManualConfig) => Promise<void>;
+    n8nConfig: N8NConfig;
+    setN8NConfig: (config: N8NConfig) => Promise<void>;
+    activeMethod: 'pixManual' | 'n8n' | null;
+    setActiveMethod: (method: 'pixManual' | 'n8n' | null) => Promise<void>;
     loading: boolean;
 }
 
@@ -18,15 +29,30 @@ const PaymentContext = createContext<PaymentContextType | undefined>(undefined);
 
 export function PaymentProvider({ children }: { children: React.ReactNode }) {
     const [loading, setLoading] = useState(true);
+    
+    // Pix Manual State
     const [pixManual, setPixManualState] = useState<PixManualConfig>(() => {
         const saved = localStorage.getItem('pix_manual_config');
         return saved ? JSON.parse(saved) : {
             keyType: '',
             pixKey: '',
             accountHolder: '',
-            isConfigured: false
+            isConfigured: false,
+            isActive: false
         };
     });
+
+    // N8N State
+    const [n8nConfig, setN8NConfigState] = useState<N8NConfig>(() => {
+        const saved = localStorage.getItem('n8n_config');
+        return saved ? JSON.parse(saved) : {
+            createUrl: '',
+            checkUrl: '',
+            isActive: false
+        };
+    });
+
+    const [activeMethod, setActiveMethodState] = useState<'pixManual' | 'n8n' | null>(null);
 
     useEffect(() => {
         fetchPaymentConfig();
@@ -38,6 +64,13 @@ export function PaymentProvider({ children }: { children: React.ReactNode }) {
 
         return () => subscription.unsubscribe();
     }, []);
+
+    useEffect(() => {
+        // Determine active method on load based on config
+        if (n8nConfig.isActive) setActiveMethodState('n8n');
+        else if (pixManual.isActive) setActiveMethodState('pixManual');
+        else setActiveMethodState(null);
+    }, [n8nConfig.isActive, pixManual.isActive]);
 
     const fetchPaymentConfig = async () => {
         try {
@@ -56,9 +89,18 @@ export function PaymentProvider({ children }: { children: React.ReactNode }) {
                 return;
             }
 
-            if (data?.payment_methods_config?.pixManual) {
-                setPixManualState(data.payment_methods_config.pixManual);
-                localStorage.setItem('pix_manual_config', JSON.stringify(data.payment_methods_config.pixManual));
+            if (data?.payment_methods_config) {
+                const config = data.payment_methods_config;
+                
+                if (config.pixManual) {
+                    setPixManualState(config.pixManual);
+                    localStorage.setItem('pix_manual_config', JSON.stringify(config.pixManual));
+                }
+                
+                if (config.n8nConfig) {
+                    setN8NConfigState(config.n8nConfig);
+                    localStorage.setItem('n8n_config', JSON.stringify(config.n8nConfig));
+                }
             }
         } catch (error) {
             console.error('Error in fetchPaymentConfig:', error);
@@ -67,17 +109,11 @@ export function PaymentProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
-    const setPixManual = async (config: PixManualConfig) => {
-        setPixManualState(config);
-        localStorage.setItem('pix_manual_config', JSON.stringify(config));
-
+    const updateProfileConfig = async (newConfig: any) => {
         try {
             const { data: { user } } = await supabase.auth.getUser();
-            if (!user) {
-                return;
-            }
+            if (!user) return;
 
-            // Fetch current config first to merge
             const { data: profile } = await supabase
                 .from('profiles')
                 .select('payment_methods_config')
@@ -85,13 +121,13 @@ export function PaymentProvider({ children }: { children: React.ReactNode }) {
                 .maybeSingle();
 
             const currentConfig = profile?.payment_methods_config || {};
-
+            
             const { error } = await supabase
                 .from('profiles')
                 .update({
                     payment_methods_config: {
                         ...currentConfig,
-                        pixManual: config
+                        ...newConfig
                     }
                 })
                 .eq('id', user.id);
@@ -102,8 +138,62 @@ export function PaymentProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
+    const setPixManual = async (config: PixManualConfig) => {
+        // If activating Pix Manual, deactivate N8N
+        let newN8NConfig = { ...n8nConfig };
+        if (config.isActive) {
+            newN8NConfig.isActive = false;
+            setN8NConfigState(newN8NConfig);
+            localStorage.setItem('n8n_config', JSON.stringify(newN8NConfig));
+        }
+
+        setPixManualState(config);
+        localStorage.setItem('pix_manual_config', JSON.stringify(config));
+
+        await updateProfileConfig({
+            pixManual: config,
+            n8nConfig: newN8NConfig
+        });
+    };
+
+    const setN8NConfig = async (config: N8NConfig) => {
+        // If activating N8N, deactivate Pix Manual
+        let newPixConfig = { ...pixManual };
+        if (config.isActive) {
+            newPixConfig.isActive = false;
+            setPixManualState(newPixConfig);
+            localStorage.setItem('pix_manual_config', JSON.stringify(newPixConfig));
+        }
+
+        setN8NConfigState(config);
+        localStorage.setItem('n8n_config', JSON.stringify(config));
+
+        await updateProfileConfig({
+            n8nConfig: config,
+            pixManual: newPixConfig
+        });
+    };
+
+    const setActiveMethod = async (method: 'pixManual' | 'n8n' | null) => {
+        if (method === 'n8n') {
+            await setN8NConfig({ ...n8nConfig, isActive: true });
+        } else if (method === 'pixManual') {
+            await setPixManual({ ...pixManual, isActive: true });
+        } else {
+            // Deactivate both
+            await setN8NConfig({ ...n8nConfig, isActive: false });
+            await setPixManual({ ...pixManual, isActive: false });
+        }
+        setActiveMethodState(method);
+    };
+
     return (
-        <PaymentContext.Provider value={{ pixManual, setPixManual, loading }}>
+        <PaymentContext.Provider value={{ 
+            pixManual, setPixManual, 
+            n8nConfig, setN8NConfig,
+            activeMethod, setActiveMethod,
+            loading 
+        }}>
             {children}
         </PaymentContext.Provider>
     );
