@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useLocation } from 'react-router-dom';
 import { useCampaign } from '../context/CampaignContext';
 import { supabase } from '../lib/supabaseClient';
+import confetti from 'canvas-confetti';
 
 // ─── Helpers ────────────────────────────────────────────────
 function formatPhone(value: string) {
@@ -34,8 +35,44 @@ function validateCpf(cpf: string) {
    const clean = cpf.replace(/\D/g, '');
    if (clean.length !== 11) return false;
    if (/^(\d)\1+$/.test(clean)) return false; // todos digitos iguais
-   // Validação simples de tamanho por enquanto
+
+   let sum = 0;
+   let remainder;
+
+   for (let i = 1; i <= 9; i++) 
+       sum = sum + parseInt(clean.substring(i - 1, i)) * (11 - i);
+   
+   remainder = (sum * 10) % 11;
+
+   if ((remainder === 10) || (remainder === 11)) remainder = 0;
+   if (remainder !== parseInt(clean.substring(9, 10))) return false;
+
+   sum = 0;
+   for (let i = 1; i <= 10; i++) 
+       sum = sum + parseInt(clean.substring(i - 1, i)) * (12 - i);
+   
+   remainder = (sum * 10) % 11;
+
+   if ((remainder === 10) || (remainder === 11)) remainder = 0;
+   if (remainder !== parseInt(clean.substring(10, 11))) return false;
+
    return true;
+}
+
+function formatCpfOrPhone(value: string) {
+   const digits = value.replace(/\D/g, '');
+   if (digits.length > 11) {
+       // CNPJ ou erro, mas vamos assumir CPF formatado
+       return formatCpf(digits);
+   }
+   // Tenta inferir se é CPF ou Telefone pelo contexto ou deixa o usuário escolher
+   // Para simplificar a UX, se tiver 11 digitos, formatamos como CPF se começar com 0, 1, 2... 
+   // Mas telefones também têm 11. 
+   // Vamos formatar como telefone por padrão se <= 11, a menos que o usuário explicitamente selecione CPF.
+   // Melhor: Vamos formatar apenas como números se for ambíguo, ou usar duas máscaras.
+   // Vou usar uma lógica simples: Se < 11 -> Telefone parcial. Se 11 -> Telefone.
+   // O usuário terá um seletor "Buscar por: [Telefone] [CPF]" no modal.
+   return formatPhone(value);
 }
 
 function getTicketPrice(value: string) {
@@ -214,6 +251,16 @@ export default function RafflePage() {
    const [paymentData, setPaymentData] = useState<any>(null);
    const [showHistory, setShowHistory] = useState(false);
    const [customerHistory, setCustomerHistory] = useState<any[]>([]);
+   const [showPhoneModal, setShowPhoneModal] = useState(false);
+
+   // Debug para monitorar mudanças no estado do modal
+   useEffect(() => {
+      console.log('Estado do showPhoneModal mudou para:', showPhoneModal);
+   }, [showPhoneModal]);
+   const [consultPhone, setConsultPhone] = useState('');
+   const [consultCustomer, setConsultCustomer] = useState<any>(null);
+   const [consultHistory, setConsultHistory] = useState<any[]>([]);
+   const [loadingHistory, setLoadingHistory] = useState(false);
    const [proofFile, setProofFile] = useState<File | null>(null);
    const [proofPreview, setProofPreview] = useState<string | null>(null);
    const [currentPurchaseId, setCurrentPurchaseId] = useState<string | null>(null);
@@ -223,6 +270,106 @@ export default function RafflePage() {
    const [socialNetworks, setSocialNetworks] = useState<any>(null);
    const [organizerPhone, setOrganizerPhone] = useState('');
    const [purchaseCreatedAt, setPurchaseCreatedAt] = useState<Date | null>(null);
+
+   // ─── Uniqueness Validation State ─────────────────────────────
+   const [isCheckingUniqueness, setIsCheckingUniqueness] = useState(false);
+   const [uniquenessErrors, setUniquenessErrors] = useState<{phone?: string, cpf?: string}>({});
+
+   // ─── Edit State ──────────────────────────────────────────────
+   const [isEditing, setIsEditing] = useState(false);
+   const [hasChanges, setHasChanges] = useState(false);
+   const [isUpdating, setIsUpdating] = useState(false);
+   const [originalData, setOriginalData] = useState<{phone: string, email: string}>({ phone: '', email: '' });
+
+   useEffect(() => {
+      if (step !== 2) {
+         setUniquenessErrors({});
+         return;
+      }
+
+      const check = async () => {
+         setIsCheckingUniqueness(true);
+         const errors: {phone?: string, cpf?: string} = {};
+         
+         const cleanPhone = phone.replace(/\D/g, '');
+         const cleanCpf = cpf.replace(/\D/g, '');
+         
+         try {
+            // Check Phone Uniqueness
+            if (cleanPhone.length >= 10) {
+               if (existingCustomer && cleanPhone === existingCustomer.phone) {
+                   // OK
+               } else {
+                   let query = supabase.from('customers').select('id').eq('phone', cleanPhone);
+                   if (existingCustomer) query = query.neq('id', existingCustomer.id);
+                   const { data } = await query.maybeSingle();
+                   if (data) errors.phone = 'Telefone já cadastrado em outra conta.';
+               }
+            }
+            
+            // Check CPF Uniqueness
+            if (cleanCpf.length === 11) {
+               const formattedCpf = formatCpf(cleanCpf);
+               
+               if (existingCustomer && (cleanCpf === existingCustomer.cpf || formattedCpf === existingCustomer.cpf)) {
+                   // OK
+               } else {
+                   // Busca sequencial para garantir que o .or() não falhe
+                   let found = false;
+                   
+                   // 1. Tenta Formatado
+                   let query1 = supabase.from('customers').select('id').eq('cpf', formattedCpf);
+                   if (existingCustomer) query1 = query1.neq('id', existingCustomer.id);
+                   const { data: d1 } = await query1.maybeSingle();
+                   
+                   if (d1) {
+                       found = true;
+                   } else {
+                       // 2. Tenta Limpo
+                       let query2 = supabase.from('customers').select('id').eq('cpf', cleanCpf);
+                       if (existingCustomer) query2 = query2.neq('id', existingCustomer.id);
+                       const { data: d2 } = await query2.maybeSingle();
+                       if (d2) found = true;
+                   }
+                   
+                   if (found) errors.cpf = 'CPF já cadastrado em outra conta.';
+               }
+            }
+         } catch (e) {
+            console.error(e);
+         } finally {
+            setUniquenessErrors(errors);
+            setIsCheckingUniqueness(false);
+         }
+      };
+
+      const timer = setTimeout(check, 800);
+      return () => clearTimeout(timer);
+   }, [step, phone, cpf, existingCustomer]);
+
+   // Monitorar mudanças nos campos editáveis para clientes existentes
+   useEffect(() => {
+      if (!existingCustomer) {
+         setHasChanges(false);
+         setIsEditing(false);
+         return;
+      }
+      
+      const phoneChanged = phone !== originalData.phone;
+      const emailChanged = email !== originalData.email;
+      
+      setHasChanges(phoneChanged || emailChanged);
+   }, [phone, email, existingCustomer, originalData]);
+
+   // Atualizar dados originais quando cliente é carregado
+   useEffect(() => {
+      if (existingCustomer) {
+         setOriginalData({
+            phone: formatPhone(existingCustomer.phone),
+            email: existingCustomer.email || ''
+         });
+      }
+   }, [existingCustomer]);
 
    // ─── Celebration State ─────────────────────────────────────
    const [winners, setWinners] = useState<any[]>([]);
@@ -509,97 +656,11 @@ export default function RafflePage() {
    }, [location.search, campaign]);
 
    // ─── Scheduled Status Checks for N8N Payment ────────────────
-   const [checkStatusText, setCheckStatusText] = useState('Verificando pagamento automaticamente...');
+   const [checkStatusText, setCheckStatusText] = useState('Verificando manualmente...');
 
-   useEffect(() => {
-      // Ensure we have the ID to check
-      const idPix = paymentData?.id_pix || paymentData?.['id-pix'];
-      
-      // Only run if we are in Step 7 AND have config AND have an ID
-      if (step !== 7 || !n8nConfig.checkUrl || !idPix || !purchaseCreatedAt) return;
-
-      const checkStatus = async () => {
-          try {
-              setCheckStatusText('Consultando banco...');
-              
-              let targetUrl = n8nConfig.checkUrl;
-              
-              // Append ID to URL
-              const urlObj = new URL(targetUrl);
-              urlObj.searchParams.append("id-pix", idPix);
-              urlObj.searchParams.append("_t", Date.now().toString());
-              
-              const payload = { "id-pix": idPix };
-
-              const response = await fetch(urlObj.toString(), {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(payload)
-              });
-              
-              if (!response.ok) throw new Error('Erro na resposta do servidor');
-
-              const result = await response.json();
-              
-              const status = result.status || result['status-payment'] || result.payment_status;
-
-              if (status === 'approved' || status === 'success') {
-                  setCheckStatusText('Pagamento aprovado!');
-                  // Update local status and UI
-                  await supabase
-                      .from('purchase_history')
-                      .update({ status: 'approved' })
-                      .eq('id', currentPurchaseId);
-                      
-                  setStep(6); // Success
-              } else {
-                  setCheckStatusText('Aguardando confirmação do banco...');
-              }
-          } catch (error) {
-              console.error('Check error:', error);
-              setCheckStatusText('Tentando novamente em instantes...');
-          }
-      };
-
-      // Check immediately
-      checkStatus();
-
-      // Poll every 10 seconds
-      const interval = setInterval(() => {
-          const now = new Date();
-          const createdAt = purchaseCreatedAt.getTime();
-          const paymentTimeMs = paymentMinutes * 60 * 1000;
-          const expirationTime = createdAt + paymentTimeMs;
-
-          if (now.getTime() > expirationTime) {
-              // Expired
-              console.log('Tempo de pagamento expirado.');
-              clearInterval(interval);
-              setCheckStatusText('Tempo expirado.');
-              
-              // Only cancel if we haven't confirmed yet
-              supabase
-                  .from('purchase_history')
-                  .select('status')
-                  .eq('id', currentPurchaseId)
-                  .single()
-                  .then(({ data }) => {
-                      if (data?.status !== 'approved') {
-                           supabase
-                              .from('purchase_history')
-                              .update({ status: 'cancelled' })
-                              .eq('id', currentPurchaseId)
-                              .then(() => setStep(5));
-                      }
-                  });
-              return;
-          }
-
-          checkStatus();
-      }, 10000);
-
-      return () => clearInterval(interval);
-   }, [step, n8nConfig.checkUrl, paymentData, purchaseCreatedAt, paymentMinutes, currentPurchaseId]);
+   // Polling removido conforme solicitação. O usuário deve clicar para verificar.
+   // Mantemos apenas a lógica de expiração visual se necessário, ou removemos também.
+   // Vou remover o useEffect de polling completo.
 
    const handleManualCheck = async () => {
        const idPix = paymentData?.id_pix || paymentData?.['id-pix'];
@@ -752,8 +813,12 @@ export default function RafflePage() {
    };
 
    const handlePhoneChange = (v: string) => {
-      const formatted = formatPhone(v);
-      setPhone(formatted);
+      const clean = v.replace(/\D/g, '');
+      if (clean.length <= 11) {
+          setPhone(formatPhone(v));
+      } else {
+          setPhone(formatCpf(v));
+      }
    };
    
    const handleCpfChange = (v: string) => {
@@ -762,26 +827,61 @@ export default function RafflePage() {
    };
 
    const handlePhoneBlur = async () => {
-      if (!isPhoneComplete(phone)) return;
+      const cleanVal = phone.replace(/\D/g, '');
+      if (cleanVal.length < 10) return; 
+      
       setLookingUp(true);
       try {
-         const raw = phone.replace(/\D/g, '');
-         const { data } = await supabase
+         const formattedCpf = formatCpf(cleanVal);
+         let customer = null;
+
+         // 1. Busca por Telefone (prioridade)
+         const { data: phoneRes } = await supabase
             .from('customers')
             .select('*')
-            .eq('phone', raw)
+            .eq('phone', cleanVal)
             .maybeSingle();
-         if (data) {
-            setExistingCustomer(data);
-            setName(data.name);
-            setEmail(data.email || '');
-            if (data.cpf) setCpf(data.cpf);
+            
+         if (phoneRes) {
+             customer = phoneRes;
+         } else if (cleanVal.length === 11) {
+             // 2. Busca por CPF (se não achou por telefone e tem 11 dígitos)
+             // Tenta formatado
+             const { data: cpfResFmt } = await supabase
+                .from('customers')
+                .select('*')
+                .eq('cpf', formattedCpf)
+                .maybeSingle();
+                
+             if (cpfResFmt) {
+                 customer = cpfResFmt;
+             } else {
+                 // Tenta limpo
+                 const { data: cpfResClean } = await supabase
+                    .from('customers')
+                    .select('*')
+                    .eq('cpf', cleanVal)
+                    .maybeSingle();
+                 customer = cpfResClean;
+             }
+         }
+            
+         if (customer) {
+            setExistingCustomer(customer);
+            setName(customer.name);
+            setEmail(customer.email || '');
+            if (customer.cpf) setCpf(customer.cpf);
+            
+            // Se achou por CPF, garantir que o telefone no input seja o do cliente
+            if (cleanVal !== customer.phone && customer.phone) {
+                setPhone(formatPhone(customer.phone));
+            }
 
             // 1. Check for PENDING purchase first (Blocker)
             const { data: pendingPurchase } = await supabase
                .from('purchase_history')
                .select('*, customers(*)')
-               .eq('customer_id', data.id)
+               .eq('customer_id', customer.id)
                .eq('campaign_id', campaign.id)
                .eq('status', 'pending')
                .order('created_at', { ascending: false })
@@ -806,12 +906,18 @@ export default function RafflePage() {
                } else {
                    setStep(3);
                }
-               return; // Stop here, don't just set existing customer
+               return; 
             }
-
-            // 2. If NO pending, just enable history button
          } else {
             setExistingCustomer(null);
+            // Se não achou, pré-configura os campos para novo cadastro
+            // Só copia para CPF se parecer CPF (pontos) e não parecer telefone (parênteses)
+            const hasDots = phone.includes('.');
+            const hasParenthesis = phone.includes('(');
+            
+            if ((validateCpf(phone) || hasDots) && !hasParenthesis) {
+                setCpf(phone);
+            }
          }
       } catch (_) {
       } finally {
@@ -830,13 +936,243 @@ export default function RafflePage() {
       setShowHistory(true);
    };
 
+   const handleConsultPhoneChange = (v: string) => {
+      // O modal controla a formatação baseada na aba ativa
+      setConsultPhone(v);
+   };
+
+   const handleConsultPhoneBlur = async () => {
+      const cleanVal = consultPhone.replace(/\D/g, '');
+      if (cleanVal.length < 11) return; // Mínimo aceitável
+      
+      console.log('Iniciando consulta para:', cleanVal);
+      setLoadingHistory(true);
+      try {
+         // Buscar cliente por Telefone OU CPF
+         const { data: customer, error: customerError } = await supabase
+            .from('customers')
+            .select('*')
+            .or(`phone.eq.${cleanVal},cpf.eq.${formatCpf(cleanVal)}`) // Tenta raw phone ou CPF formatado? 
+            // Melhor: Tenta phone raw e CPF raw (se salvo raw no banco). 
+            // O código de salvamento usa: phone: rawPhone, cpf: cpf.trim() (que é formatado no state).
+            // Vou verificar como o CPF é salvo.
+            // No handleFinalize: setCpf(formatCpf(v)).
+            // upsert({ cpf: cpf.trim() || null }) -> Salva formatado?
+            // A função formatCpf retorna formatado "000.000.000-00".
+            // Então no banco deve estar formatado.
+            // Vou tentar buscar pelo CPF formatado também.
+            .maybeSingle();
+            
+         // Ajuste na query:
+         // Se cleanVal for CPF, formatCpf(cleanVal) gera o formato.
+         // Se cleanVal for Phone, usa cleanVal.
+         // A query .or aceita string crua.
+         
+         // Mas espere, se eu busco por CPF, tenho que enviar formatado se no banco estiver formatado.
+         // Se eu busco por telefone, envio limpo.
+         // Vou fazer duas queries ou usar .or com os dois formatos.
+         
+         const formattedCpf = formatCpf(cleanVal);
+         
+         const { data: customerFound, error: searchError } = await supabase
+            .from('customers')
+            .select('*')
+            .or(`phone.eq.${cleanVal},cpf.eq.${formattedCpf},cpf.eq.${cleanVal}`) // Tenta todas as variações
+            .maybeSingle();
+         
+         console.log('Resultado da busca:', customerFound, 'Erro:', searchError);
+         
+         if (!customerFound) {
+            // Cliente não encontrado - O modal vai mostrar o botão de cadastro
+            setConsultCustomer(null);
+            setConsultHistory([]);
+            return;
+         }
+         
+         setConsultCustomer(customerFound);
+         console.log('Cliente encontrado:', customerFound);
+         
+         // Buscar histórico de compras da campanha vigente
+         const { data: history, error: historyError } = await supabase
+            .from('purchase_history')
+            .select('*')
+            .eq('customer_id', customerFound.id)
+            .eq('campaign_id', campaign.id)
+            .order('created_at', { ascending: false });
+         
+         console.log('Histórico encontrado:', history, 'Erro:', historyError);
+         setConsultHistory(history || []);
+         
+      } catch (error) {
+         console.error('Erro ao consultar histórico:', error);
+         alert('Erro ao consultar histórico. Tente novamente.');
+      } finally {
+         setLoadingHistory(false);
+      }
+   };
+
+   const handleFinalizePendingPurchase = async (purchaseId: string) => {
+      try {
+         const { data: purchase } = await supabase
+            .from('purchase_history')
+            .select('*')
+            .eq('id', purchaseId)
+            .maybeSingle();
+         
+         if (!purchase) {
+            alert('Compra não encontrada.');
+            return;
+         }
+         
+         // Redirecionar para o pagamento da compra pendente
+         setCurrentPurchaseId(purchase.id);
+         if (purchase.created_at) setPurchaseCreatedAt(new Date(purchase.created_at));
+         setSelectedTickets(purchase.tickets || []);
+         
+         if (purchase.payment_info) {
+            setPaymentData(purchase.payment_info);
+         }
+         
+         // Fechar modais
+         setShowPhoneModal(false);
+         setConsultPhone('');
+         setConsultCustomer(null);
+         setConsultHistory([]);
+         
+         // Ir para a tela de pagamento apropriada
+         if (activeMethod === 'n8n' && purchase.payment_info) {
+            setStep(7);
+         } else if (purchase.proof_url) {
+            setStep(4);
+         } else {
+            setStep(3);
+         }
+         
+      } catch (error) {
+         console.error('Erro ao finalizar compra pendente:', error);
+         alert('Erro ao processar compra. Tente novamente.');
+      }
+   };
+
+   const handleUpdateCustomer = async () => {
+      if (!existingCustomer || !hasChanges) return;
+      
+      setIsUpdating(true);
+      try {
+         const cleanPhone = phone.replace(/\D/g, '');
+         
+         // Validar unicidade do telefone antes de atualizar
+         if (cleanPhone !== existingCustomer.phone) {
+            const { data: phoneCheck } = await supabase
+               .from('customers')
+               .select('id')
+               .eq('phone', cleanPhone)
+               .neq('id', existingCustomer.id)
+               .maybeSingle();
+               
+            if (phoneCheck) {
+               alert('Este telefone já está cadastrado em outra conta.');
+               setIsUpdating(false);
+               return;
+            }
+         }
+         
+         // Atualizar no banco
+         const { error } = await supabase
+            .from('customers')
+            .update({ 
+               phone: cleanPhone,
+               email: email.trim() || null
+            })
+            .eq('id', existingCustomer.id);
+            
+         if (error) throw error;
+         
+         // Atualizar cliente local e dados originais
+         const updatedCustomer = {
+            ...existingCustomer,
+            phone: cleanPhone,
+            email: email.trim() || null
+         };
+         
+         setExistingCustomer(updatedCustomer);
+         setOriginalData({
+            phone: formatPhone(cleanPhone),
+            email: email.trim() || null
+         });
+         
+         setIsEditing(false);
+         setHasChanges(false);
+         
+         alert('Dados atualizados com sucesso!');
+         
+      } catch (error) {
+         console.error('Erro ao atualizar cliente:', error);
+         alert('Erro ao atualizar dados. Tente novamente.');
+      } finally {
+         setIsUpdating(false);
+      }
+   };
+
    const handleStep1Continue = () => {
-      if (!isPhoneComplete(phone)) {
-         setErrors({ phone: 'Digite um telefone válido com DDD e 9 dígitos.' });
+      // Se já temos um cliente identificado, usamos os dados dele
+      if (existingCustomer) {
+         setPhone(formatPhone(existingCustomer.phone));
+         setCpf(existingCustomer.cpf ? formatCpf(existingCustomer.cpf) : '');
+         setName(existingCustomer.name || '');
+         setEmail(existingCustomer.email || '');
+         setErrors({});
+         setStep(2);
          return;
       }
-      setErrors({});
-      setStep(2);
+
+      const clean = phone.replace(/\D/g, '');
+      const hasDots = phone.includes('.');
+      const hasParenthesis = phone.includes('(') || phone.includes(')');
+      
+      let isCpf = false;
+      
+      if (hasDots) {
+          isCpf = true;
+      } else if (hasParenthesis) {
+          isCpf = false;
+      } else {
+          // Apenas números ou hifens
+          if (validateCpf(phone)) {
+              isCpf = true;
+          } else {
+              // Heurística para desempate
+              const ddd = parseInt(clean.substring(0, 2));
+              const third = clean[2];
+              if (ddd >= 11 && ddd <= 99 && third === '9') {
+                  isCpf = false;
+              } else {
+                  isCpf = true; // Assume CPF por padrão se não parecer telefone
+              }
+          }
+      }
+
+      if (isCpf) {
+          if (!validateCpf(phone)) {
+              setErrors({ phone: 'CPF inválido. Verifique os dígitos.' });
+              return;
+          }
+          setCpf(phone);
+          setPhone(''); 
+          setErrors({});
+          setStep(2);
+          return;
+      } else {
+          // Telefone
+          if (clean.length < 10 || clean.length > 11) {
+             setErrors({ phone: 'Telefone inválido.' });
+             return;
+          }
+          setCpf('');
+          setErrors({});
+          setStep(2);
+          return;
+      }
    };
 
    const validateStep2 = () => {
@@ -846,6 +1182,7 @@ export default function RafflePage() {
          e.email = 'Formato de e-mail inválido.';
       if (activeMethod === 'n8n' && !validateCpf(cpf))
          e.cpf = 'CPF inválido.';
+      if (!isPhoneComplete(phone)) e.phone = 'Telefone obrigatório.';
       if (!termsAccepted) e.terms = 'Você deve aceitar os termos.';
       return e;
    };
@@ -853,26 +1190,69 @@ export default function RafflePage() {
    const handleFinalize = async () => {
       const e = validateStep2();
       if (Object.keys(e).length > 0) { setErrors(e); return; }
+
+      const cleanPhone = phone.replace(/\D/g, '');
+      const cleanCpf = cpf.replace(/\D/g, '');
+      const formattedCpf = cleanCpf ? formatCpf(cleanCpf) : null;
+
+      // Validação de duplicidade e atualização
+      if (!existingCustomer) {
+         // Novo cliente: verificar se telefone ou CPF já existem
+         const { data: phoneCheck } = await supabase.from('customers').select('id').eq('phone', cleanPhone).maybeSingle();
+         if (phoneCheck) { setErrors({ phone: 'Este telefone já possui cadastro. Faça login.' }); return; }
+         
+         if (cleanCpf) {
+             const { data: cpfCheck } = await supabase.from('customers').select('id').or(`cpf.eq.${formattedCpf},cpf.eq.${cleanCpf}`).maybeSingle();
+             if (cpfCheck) { setErrors({ cpf: 'Este CPF já está vinculado a outra conta.' }); return; }
+         }
+      } else {
+         // Cliente existente: verificar se mudou o telefone para um já existente
+         if (cleanPhone !== existingCustomer.phone) {
+             const { data: phoneCheck } = await supabase.from('customers').select('id').eq('phone', cleanPhone).neq('id', existingCustomer.id).maybeSingle();
+             if (phoneCheck) { setErrors({ phone: 'Este telefone já está em uso por outra conta.' }); return; }
+         }
+      }
+
       setErrors({});
       setSubmitting(true);
       setIsGeneratingPix(true);
       
       try {
-         const rawPhone = phone.replace(/\D/g, '');
-         
-         // Upsert customer with CPF
-         const { data: customer, error: custErr } = await supabase
-            .from('customers')
-            .upsert({ 
-                phone: rawPhone, 
-                name: name.trim(), 
-                email: email.trim() || null,
-                cpf: cpf.trim() || null
-            }, { onConflict: 'phone' })
-            .select()
-            .maybeSingle();
+         let customer;
+         const rawPhone = cleanPhone;
+
+         if (existingCustomer) {
+             // Atualizar cliente existente
+             const { data, error } = await supabase
+                .from('customers')
+                .update({ 
+                    name: name.trim(), 
+                    email: email.trim() || null,
+                    phone: rawPhone
+                })
+                .eq('id', existingCustomer.id)
+                .select()
+                .single();
+                
+             if (error) throw error;
+             customer = data;
+         } else {
+             // Criar novo cliente
+             const { data, error } = await supabase
+                .from('customers')
+                .insert({ 
+                    phone: rawPhone, 
+                    name: name.trim(), 
+                    email: email.trim() || null,
+                    cpf: formattedCpf || null
+                })
+                .select()
+                .single();
+                
+             if (error) throw error;
+             customer = data;
+         }
             
-         if (custErr) throw custErr;
          if (!customer) throw new Error('Falha ao registrar cliente');
 
          // Create purchase record
@@ -1018,10 +1398,17 @@ export default function RafflePage() {
             </div>
          </div>
          {step === 0 && !isCelebration && (
-            <button className="w-10 h-10 bg-[#6366F1] rounded-xl flex items-center justify-center relative shadow-sm">
-               <span className="material-icons-outlined text-white text-lg">shopping_cart</span>
+            <button 
+               onClick={() => {
+                  console.log('Botão Consultar clicado');
+                  setShowPhoneModal(true);
+               }}
+               className="bg-[#6366F1] hover:bg-[#5558dd] text-white px-4 py-2 rounded-xl flex items-center justify-center gap-2 relative shadow-lg shadow-indigo-500/30 transition-all active:scale-[0.98] animate-pulse"
+            >
+               <span className="material-icons-outlined text-white text-lg">search</span>
+               <span className="font-bold text-sm">Consultar</span>
                {selectedTickets.length > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center border-2 border-white">
+                  <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center border-2 border-white animate-none">
                      {selectedTickets.length}
                   </span>
                )}
@@ -1187,6 +1574,74 @@ export default function RafflePage() {
                   </button>
                </div>
             </div>
+
+            {/* Phone Consultation Modal */}
+            <PhoneConsultModal
+               isOpen={showPhoneModal}
+               onClose={() => {
+                  setShowPhoneModal(false);
+                  setConsultPhone('');
+                  setConsultCustomer(null);
+                  setConsultHistory([]);
+               }}
+               phone={consultPhone}
+               onPhoneChange={handleConsultPhoneChange}
+               onPhoneBlur={handleConsultPhoneBlur}
+               customer={consultCustomer}
+               history={consultHistory}
+               loading={loadingHistory}
+               onFinalizePurchase={handleFinalizePendingPurchase}
+            />
+
+            {/* History Modal for existing customer */}
+            {showHistory && (
+               <HistoryModal
+                  isOpen={showHistory}
+                  onClose={() => setShowHistory(false)}
+                  history={customerHistory}
+               />
+            )}
+
+            {/* Terms Modal */}
+            {showTermsModal && (
+               <TermsModal 
+                  description={campaign.description} 
+                  onClose={() => setShowTermsModal(false)} 
+               />
+            )}
+            
+            {/* Claim Prize Modal */}
+            {claimModalOpen && (
+               <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                  <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl">
+                     <h3 className="font-bold text-slate-900 mb-4">Resgatar Prêmio</h3>
+                     <p className="text-sm text-slate-600 mb-4">
+                        Confirme seu telefone para resgatar o prêmio: <strong>{claimWinnerData?.prize}</strong>
+                     </p>
+                     <input
+                        type="tel"
+                        placeholder="Seu telefone"
+                        value={claimPhoneInput}
+                        onChange={(e) => setClaimPhoneInput(e.target.value)}
+                        className="w-full border rounded-xl px-4 py-3 text-slate-800 mb-4 focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none"
+                     />
+                     <div className="flex gap-3">
+                        <button
+                           onClick={() => setClaimModalOpen(false)}
+                           className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-3 rounded-xl transition-colors"
+                        >
+                           Cancelar
+                        </button>
+                        <button
+                           onClick={handleConfirmClaim}
+                           className="flex-1 bg-[#6366F1] hover:bg-[#5558dd] text-white font-bold py-3 rounded-xl transition-colors"
+                        >
+                           Confirmar
+                        </button>
+                     </div>
+                  </div>
+               </div>
+            )}
          </div>
       );
    }
@@ -1220,14 +1675,29 @@ export default function RafflePage() {
                <SummaryBox />
                <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-4">
                   <div>
-                     <label className="block text-sm font-bold text-slate-700 mb-1.5">Seu telefone</label>
+                     <label className="block text-sm font-bold text-slate-700 mb-1.5">CPF ou Telefone</label>
                      <input
                         ref={phoneRef}
                         type="tel"
                         inputMode="numeric"
-                        placeholder="(99) 99999-9999"
+                        placeholder="Informe seu CPF ou Telefone"
                         value={phone}
-                        onChange={(e) => handlePhoneChange(e.target.value)}
+                        onChange={(e) => {
+                           const v = e.target.value;
+                           const d = v.replace(/\D/g, '');
+                           
+                           if (d.length <= 10) {
+                              setPhone(formatPhone(d));
+                           } else {
+                              const ddd = parseInt(d.substring(0, 2));
+                              const third = d[2];
+                              if (ddd >= 11 && ddd <= 99 && third === '9') {
+                                 setPhone(formatPhone(d));
+                              } else {
+                                 setPhone(formatCpf(d));
+                              }
+                           }
+                        }}
                         onBlur={handlePhoneBlur}
                         className={`w-full border rounded-xl px-4 py-3 text-slate-800 text-base focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none placeholder-slate-300 ${errors.phone ? 'border-red-400 bg-red-50' : 'border-slate-200'}`}
                      />
@@ -1264,10 +1734,18 @@ export default function RafflePage() {
                <CheckoutHeader />
                <SummaryBox />
                <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-4">
-                  {/* Phone (readonly) */}
+                  {/* Phone */}
                   <div>
-                     <label className="block text-xs text-slate-400 mb-1 font-medium">Seu telefone</label>
-                     <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-500 text-sm">{phone}</div>
+                     <label className="block text-sm font-bold text-slate-700 mb-1.5">Seu telefone {activeMethod === 'n8n' && <span className="text-red-500">*</span>}</label>
+                     <input
+                        type="tel"
+                        placeholder="(99) 99999-9999"
+                        value={phone}
+                        onChange={(e) => setPhone(formatPhone(e.target.value))}
+                        className={`w-full border rounded-xl px-4 py-3 text-slate-800 text-base focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none placeholder-slate-300 ${errors.phone || uniquenessErrors.phone ? 'border-red-400 bg-red-50' : 'border-slate-200'}`}
+                     />
+                     {errors.phone && !isPhoneComplete(phone) && <p className="text-xs text-red-500 mt-1">{errors.phone}</p>}
+                     {uniquenessErrors.phone && <p className="text-xs text-red-500 mt-1 font-bold">{uniquenessErrors.phone}</p>}
                   </div>
                   
                   {/* Name */}
@@ -1278,12 +1756,13 @@ export default function RafflePage() {
                         placeholder="digite seu nome"
                         value={name}
                         onChange={(e) => setName(e.target.value.toUpperCase())}
-                        className={`w-full border rounded-xl px-4 py-3 text-slate-800 text-base uppercase focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none placeholder-slate-300 placeholder:normal-case ${errors.name ? 'border-red-400 bg-red-50' : 'border-slate-200'}`}
+                        disabled={!!existingCustomer}
+                        className={`w-full border rounded-xl px-4 py-3 text-slate-800 text-base uppercase focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none placeholder-slate-300 placeholder:normal-case ${errors.name ? 'border-red-400 bg-red-50' : 'border-slate-200'} ${existingCustomer ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
                      />
                      {errors.name && <p className="text-xs text-red-500 mt-1">{errors.name}</p>}
                   </div>
 
-                  {/* CPF Field (New) */}
+                  {/* CPF Field */}
                   <div>
                      <label className="block text-sm font-bold text-slate-700 mb-1.5">Seu CPF {activeMethod === 'n8n' && <span className="text-red-500">*</span>}</label>
                      <input
@@ -1292,9 +1771,11 @@ export default function RafflePage() {
                         placeholder="000.000.000-00"
                         value={cpf}
                         onChange={(e) => handleCpfChange(e.target.value)}
-                        className={`w-full border rounded-xl px-4 py-3 text-slate-800 text-base focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none placeholder-slate-300 ${errors.cpf ? 'border-red-400 bg-red-50' : 'border-slate-200'}`}
+                        disabled={!!existingCustomer}
+                        className={`w-full border rounded-xl px-4 py-3 text-slate-800 text-base focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none placeholder-slate-300 ${errors.cpf || uniquenessErrors.cpf ? 'border-red-400 bg-red-50' : 'border-slate-200'} ${existingCustomer ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
                      />
                      {errors.cpf && <p className="text-xs text-red-500 mt-1">{errors.cpf}</p>}
+                     {uniquenessErrors.cpf && <p className="text-xs text-red-500 mt-1 font-bold">{uniquenessErrors.cpf}</p>}
                   </div>
 
                   {/* Email */}
@@ -1330,24 +1811,47 @@ export default function RafflePage() {
                      {errors.terms && <p className="text-xs text-red-500 mt-2">{errors.terms}</p>}
                   </div>
 
-                  <button
-                     onClick={handleFinalize}
-                     disabled={submitting || isGeneratingPix}
-                     className="w-full bg-[#6366F1] hover:bg-[#5558dd] disabled:opacity-70 text-white font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
-                  >
-                     {isGeneratingPix 
-                        ? (
-                            <>
-                                <span className="material-icons-round animate-spin text-sm">sync</span>
-                                Gerando Pix...
-                            </>
-                        )
-                        : (activeMethod === 'n8n' ? 'Gerar Pix' : 'Finalizar compra')
-                     }
-                  </button>
+                  {/* Botões de ação */}
+                  {existingCustomer && hasChanges ? (
+                     <button
+                        onClick={handleUpdateCustomer}
+                        disabled={isUpdating || isCheckingUniqueness || Object.keys(uniquenessErrors).length > 0}
+                        className="w-full bg-[#10B981] hover:bg-[#059669] disabled:opacity-70 text-white font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
+                     >
+                        {isUpdating ? (
+                           <>
+                              <span className="material-icons-round animate-spin text-sm">sync</span>
+                              Atualizando...
+                           </>
+                        ) : (
+                           <>
+                              <span className="material-icons-round text-sm">update</span>
+                              Atualizar
+                           </>
+                        )}
+                     </button>
+                  ) : (
+                     <button
+                        onClick={handleFinalize}
+                        disabled={submitting || isGeneratingPix || isCheckingUniqueness || Object.keys(uniquenessErrors).length > 0 || (existingCustomer && hasChanges)}
+                        className="w-full bg-[#6366F1] hover:bg-[#5558dd] disabled:opacity-70 text-white font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
+                     >
+                        {isCheckingUniqueness ? (
+                           <>
+                              <span className="material-icons-round animate-spin text-sm">sync</span>
+                              Verificando dados...
+                           </>
+                        ) : isGeneratingPix ? (
+                           <>
+                              <span className="material-icons-round animate-spin text-sm">sync</span>
+                              Gerando Pix...
+                           </>
+                        ) : (activeMethod === 'n8n' ? 'Gerar Pix' : 'Finalizar compra')}
+                     </button>
+                  )}
                   <button
                      onClick={() => setStep(0)}
-                     disabled={submitting || isGeneratingPix}
+                     disabled={submitting || isGeneratingPix || isUpdating}
                      className="w-full mt-3 bg-transparent hover:bg-slate-100 text-slate-500 font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
                   >
                      Voltar e escolher mais
@@ -1611,19 +2115,419 @@ export default function RafflePage() {
    }
 
    if (step === 6) {
+      useEffect(() => {
+         const duration = 3000;
+         const end = Date.now() + duration;
+
+         (function frame() {
+            confetti({
+               particleCount: 4,
+               angle: 60,
+               spread: 55,
+               origin: { x: 0 },
+               colors: ['#22c55e', '#10b981', '#ffffff']
+            });
+            confetti({
+               particleCount: 4,
+               angle: 120,
+               spread: 55,
+               origin: { x: 1 },
+               colors: ['#22c55e', '#10b981', '#ffffff']
+            });
+
+            if (Date.now() < end) {
+               requestAnimationFrame(frame);
+            }
+         }());
+      }, []);
+
       return (
-         <div className="bg-[#121212] min-h-screen font-sans pb-10 flex flex-col items-center justify-center p-4">
-            <div className="w-full max-w-md bg-[#022c22] rounded-3xl border border-emerald-900/50 p-6 text-center relative overflow-hidden shadow-2xl">
-               <div className="absolute inset-0 bg-gradient-to-b from-emerald-500/10 to-transparent pointer-events-none" />
-               <div className="w-20 h-20 bg-gradient-to-br from-emerald-400 to-emerald-600 rounded-2xl mx-auto mb-6 flex items-center justify-center shadow-lg shadow-emerald-500/30 rotate-3">
-                  <span className="material-icons-round text-white text-4xl">check</span>
+         <div className="bg-[#0f172a] min-h-screen font-sans flex flex-col items-center justify-center p-4 relative">
+            <div className="w-full max-w-md bg-white rounded-3xl overflow-hidden shadow-2xl relative z-10">
+               {/* Header Verde */}
+               <div className="bg-emerald-500 p-8 text-center relative overflow-hidden">
+                  <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10"></div>
+                  <div className="w-20 h-20 bg-white rounded-full mx-auto mb-4 flex items-center justify-center shadow-lg animate-bounce">
+                     <span className="material-icons-round text-emerald-500 text-5xl">check</span>
+                  </div>
+                  <h2 className="text-2xl font-black text-white mb-1">Pagamento Aprovado!</h2>
+                  <p className="text-emerald-100 text-sm font-medium">Sua participação está confirmada</p>
                </div>
-               <h2 className="text-2xl font-black text-white mb-2">Pagamento aprovado</h2>
-               <p className="text-emerald-400 text-sm font-medium">Sua reserva foi confirmada</p>
+               
+               {/* Detalhes do Pedido */}
+               <div className="p-6 space-y-6">
+                  <div className="text-center">
+                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">PARTICIPANTE</p>
+                     <p className="text-slate-800 font-bold text-lg">{name}</p>
+                  </div>
+                  
+                  <div className="flex justify-between items-center border-b border-slate-100 pb-4">
+                     <div>
+                        <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">DATA</p>
+                        <p className="text-slate-700 font-medium">{new Date().toLocaleDateString('pt-BR')}</p>
+                     </div>
+                     <div className="text-right">
+                        <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">VALOR TOTAL</p>
+                        <p className="text-emerald-600 font-black text-xl">R$ {totalValue}</p>
+                     </div>
+                  </div>
+                  
+                  <div>
+                     <div className="flex justify-between items-end mb-3">
+                        <p className="text-slate-400 text-xs font-bold uppercase tracking-wider">COTAS ADQUIRIDAS ({selectedTickets.length})</p>
+                     </div>
+                     <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto">
+                        {selectedTickets.map(ticket => (
+                           <span key={ticket} className="bg-slate-100 text-slate-600 font-bold px-3 py-1.5 rounded-lg text-sm border border-slate-200">
+                              {String(ticket).padStart(2, '0')}
+                           </span>
+                        ))}
+                     </div>
+                  </div>
+                  
+                  <button 
+                     onClick={() => window.location.reload()}
+                     className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-4 rounded-xl shadow-lg shadow-slate-900/20 transition-all active:scale-[0.98] mt-4 flex items-center justify-center gap-2"
+                  >
+                     <span className="material-icons-round">shopping_bag</span>
+                     Comprar mais cotas
+                  </button>
+               </div>
             </div>
+            
+            <p className="text-slate-500 text-xs mt-6 text-center max-w-xs">
+               Você receberá o comprovante também no seu e-mail cadastrado. Boa sorte!
+            </p>
          </div>
       );
    }
 
    return null;
+}
+
+function PhoneConsultModal({ 
+   isOpen, 
+   onClose, 
+   phone, 
+   onPhoneChange, 
+   onPhoneBlur, 
+   customer, 
+   history, 
+   loading,
+   onFinalizePurchase
+}: { 
+   isOpen: boolean; 
+   onClose: () => void; 
+   phone: string; 
+   onPhoneChange: (v: string) => void; 
+   onPhoneBlur: () => void; 
+   customer: any; 
+   history: any[]; 
+   loading: boolean;
+   onFinalizePurchase: (purchaseId: string) => void;
+}) {
+   const [searchMode, setSearchMode] = useState<'phone' | 'cpf'>('phone');
+   const [viewMode, setViewMode] = useState<'search' | 'register'>('search');
+   
+   // Registration State
+   const [regName, setRegName] = useState('');
+   const [regPhone, setRegPhone] = useState('');
+   const [regCpf, setRegCpf] = useState('');
+   const [regLoading, setRegLoading] = useState(false);
+
+   // Reset state on open
+   useEffect(() => {
+      if (isOpen) {
+         setViewMode('search');
+         setRegName('');
+         setRegPhone('');
+         setRegCpf('');
+      }
+   }, [isOpen]);
+
+   const handleRegister = async () => {
+      if (!regName.trim() || !isPhoneComplete(regPhone) || !validateCpf(regCpf)) {
+         alert('Preencha todos os dados corretamente.');
+         return;
+      }
+      
+      setRegLoading(true);
+      try {
+         const cleanPhone = regPhone.replace(/\D/g, '');
+         const cleanCpf = regCpf.replace(/\D/g, '');
+         
+         // Verificar se telefone já existe
+         const { data: phoneCheck } = await supabase
+            .from('customers')
+            .select('id')
+            .eq('phone', cleanPhone)
+            .maybeSingle();
+            
+         if (phoneCheck) {
+            alert('Este telefone já possui cadastro.');
+            setRegLoading(false);
+            return;
+         }
+         
+         // Verificar CPF
+         const { data: cpfCheck } = await supabase
+            .from('customers')
+            .select('id')
+            .eq('cpf', cleanCpf)
+            .maybeSingle();
+            
+         if (cpfCheck) {
+            alert('Este CPF já está vinculado a outra conta.');
+            setRegLoading(false);
+            return;
+         }
+         
+         const { data, error } = await supabase
+            .from('customers')
+            .upsert({
+               name: regName.toUpperCase(),
+               phone: cleanPhone,
+               cpf: cleanCpf
+            }, { onConflict: 'phone' })
+            .select()
+            .single();
+            
+         if (error) throw error;
+         
+         alert('Cadastro realizado com sucesso!');
+         
+         // Simulate search with new data
+         onPhoneChange(cleanPhone); // Update main phone state to trigger search logic if needed
+         // However, main component handles search logic via onPhoneBlur or similar.
+         // Let's force a "found" state by calling onPhoneChange then onPhoneBlur?
+         // Better: Just reset view and let user search, or auto-search.
+         
+         setViewMode('search');
+         setSearchMode('phone');
+         onPhoneChange(formatPhone(cleanPhone));
+         // We need to trigger the search in parent. The parent uses onPhoneBlur.
+         // Let's manually trigger it or ask user to click search.
+         
+      } catch (err) {
+         console.error('Erro no cadastro:', err);
+         alert('Erro ao cadastrar. Verifique se o telefone já existe.');
+      } finally {
+         setRegLoading(false);
+      }
+   };
+
+   if (!isOpen) return null;
+   
+   return (
+      <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
+         <div 
+            className="bg-white w-full max-w-md rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[80vh]"
+            onClick={e => e.stopPropagation()}
+         >
+            <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+               <h3 className="font-bold text-slate-800">
+                  {viewMode === 'search' ? 'Consultar Compras' : 'Cadastrar Cliente'}
+               </h3>
+               <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-200 transition-colors">
+                  <span className="material-icons-round text-slate-500">close</span>
+               </button>
+            </div>
+            
+            {viewMode === 'search' ? (
+               <>
+                  <div className="p-4 border-b border-slate-100 space-y-3">
+                     {/* Toggle Search Mode */}
+                     <div className="flex bg-slate-100 p-1 rounded-xl">
+                        <button 
+                           onClick={() => { setSearchMode('phone'); onPhoneChange(''); }}
+                           className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${searchMode === 'phone' ? 'bg-white text-[#6366F1] shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                        >
+                           Telefone
+                        </button>
+                        <button 
+                           onClick={() => { setSearchMode('cpf'); onPhoneChange(''); }}
+                           className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${searchMode === 'cpf' ? 'bg-white text-[#6366F1] shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                        >
+                           CPF
+                        </button>
+                     </div>
+
+                     <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-2">
+                           {searchMode === 'phone' ? 'Informe seu telefone' : 'Informe seu CPF'}
+                        </label>
+                        <div className="flex gap-2">
+                           <input
+                              type="tel"
+                              inputMode="numeric"
+                              placeholder={searchMode === 'phone' ? '(99) 99999-9999' : '000.000.000-00'}
+                              value={phone}
+                              onChange={(e) => {
+                                 const v = e.target.value;
+                                 onPhoneChange(searchMode === 'phone' ? formatPhone(v) : formatCpf(v));
+                              }}
+                              className="flex-1 border rounded-xl px-4 py-3 text-slate-800 text-base focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none placeholder-slate-300 border-slate-200"
+                           />
+                           <button 
+                              onClick={onPhoneBlur}
+                              disabled={loading}
+                              className="bg-[#6366F1] text-white px-4 rounded-xl font-bold hover:bg-[#5558dd] transition-colors disabled:opacity-50"
+                           >
+                              <span className="material-icons-round">search</span>
+                           </button>
+                        </div>
+                     </div>
+                  </div>
+                  
+                  <div className="overflow-y-auto p-4 space-y-3 flex-1">
+                     {loading && (
+                        <div className="text-center py-8">
+                           <div className="w-6 h-6 border-2 border-[#6366F1] border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                           <p className="text-slate-500 text-sm">Consultando...</p>
+                        </div>
+                     )}
+                     
+                     {!loading && !customer && phone.length > 5 && (
+                        <div className="text-center py-8">
+                           <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                              <span className="material-icons-round text-slate-300 text-3xl">person_off</span>
+                           </div>
+                           <p className="text-slate-800 font-bold mb-1">Cliente não encontrado</p>
+                           <p className="text-slate-500 text-sm mb-4">Gostaria de realizar o cadastro?</p>
+                           <button 
+                              onClick={() => {
+                                 setViewMode('register');
+                                 if (searchMode === 'phone') setRegPhone(phone);
+                                 if (searchMode === 'cpf') setRegCpf(phone);
+                              }}
+                              className="bg-[#6366F1] text-white px-6 py-2.5 rounded-xl font-bold hover:bg-[#5558dd] transition-colors text-sm shadow-lg shadow-indigo-500/20"
+                           >
+                              Cadastrar Agora
+                           </button>
+                        </div>
+                     )}
+                     
+                     {!loading && customer && history.length === 0 && (
+                        <div className="text-center py-8">
+                           <span className="material-icons-round text-slate-300 text-4xl mb-2">receipt_long</span>
+                           <p className="text-slate-500 text-sm">Nenhuma compra encontrada nesta campanha</p>
+                        </div>
+                     )}
+                     
+                     {!loading && customer && history.length > 0 && (
+                        <div className="space-y-3">
+                           <div className="bg-slate-50 rounded-lg p-3 mb-3 border border-slate-100">
+                              <div className="flex items-center gap-3">
+                                 <div className="w-10 h-10 bg-[#6366F1]/10 rounded-full flex items-center justify-center text-[#6366F1] font-bold">
+                                    {customer.name.charAt(0)}
+                                 </div>
+                                 <div>
+                                    <p className="text-sm font-bold text-slate-800">{customer.name}</p>
+                                    <p className="text-xs text-slate-500 flex items-center gap-2">
+                                       <span>{maskPhone(customer.phone)}</span>
+                                       {customer.cpf && <span className="w-1 h-1 bg-slate-300 rounded-full"></span>}
+                                       {customer.cpf && <span>CPF: ***.{customer.cpf.slice(4,7)}***-**</span>}
+                                    </p>
+                                 </div>
+                              </div>
+                           </div>
+                           
+                           {history.map((item) => (
+                              <div key={item.id} className="border border-slate-100 rounded-xl p-3 hover:bg-slate-50 transition-colors">
+                                 <div className="flex justify-between items-start mb-2">
+                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full uppercase tracking-wide ${
+                                       item.status === 'approved' ? 'bg-emerald-100 text-emerald-600' :
+                                       item.status === 'pending' ? 'bg-amber-100 text-amber-600' :
+                                       'bg-red-100 text-red-600'
+                                    }`}>
+                                       {item.status === 'approved' ? 'Aprovado' : item.status === 'pending' ? 'Pendente' : 'Cancelado'}
+                                    </span>
+                                    <span className="text-xs text-slate-400">
+                                       {new Date(item.created_at).toLocaleDateString('pt-BR')}
+                                    </span>
+                                 </div>
+                                 <div className="flex justify-between items-end">
+                                    <div>
+                                       <p className="text-xs text-slate-500 mb-1">Cotas:</p>
+                                       <div className="flex flex-wrap gap-1">
+                                          {item.tickets.map((t: number) => (
+                                             <span key={t} className="bg-slate-200 text-slate-600 text-[10px] font-bold px-1.5 py-0.5 rounded">
+                                                {String(t).padStart(2, '0')}
+                                             </span>
+                                          ))}
+                                       </div>
+                                    </div>
+                                    <div className="text-right">
+                                       <p className="font-bold text-slate-700 text-sm">
+                                          R$ {item.total_value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                                       </p>
+                                       {item.status === 'pending' && (
+                                          <button
+                                             onClick={() => onFinalizePurchase(item.id)}
+                                             className="text-xs bg-[#6366F1] text-white px-2 py-1 rounded mt-1 hover:bg-[#5558dd] transition-colors"
+                                          >
+                                             Finalizar
+                                          </button>
+                                       )}
+                                    </div>
+                                 </div>
+                              </div>
+                           ))}
+                        </div>
+                     )}
+                  </div>
+               </>
+            ) : (
+               <div className="p-4 space-y-4">
+                  <div>
+                     <label className="block text-sm font-bold text-slate-700 mb-1.5">Nome completo</label>
+                     <input
+                        type="text"
+                        placeholder="Digite seu nome"
+                        value={regName}
+                        onChange={(e) => setRegName(e.target.value.toUpperCase())}
+                        className="w-full border rounded-xl px-4 py-3 text-slate-800 focus:ring-2 focus:ring-[#6366F1] outline-none border-slate-200 uppercase"
+                     />
+                  </div>
+                  <div>
+                     <label className="block text-sm font-bold text-slate-700 mb-1.5">Telefone (WhatsApp)</label>
+                     <input
+                        type="tel"
+                        placeholder="(99) 99999-9999"
+                        value={regPhone}
+                        onChange={(e) => setRegPhone(formatPhone(e.target.value))}
+                        className="w-full border rounded-xl px-4 py-3 text-slate-800 focus:ring-2 focus:ring-[#6366F1] outline-none border-slate-200"
+                     />
+                  </div>
+                  <div>
+                     <label className="block text-sm font-bold text-slate-700 mb-1.5">CPF</label>
+                     <input
+                        type="tel"
+                        placeholder="000.000.000-00"
+                        value={regCpf}
+                        onChange={(e) => setRegCpf(formatCpf(e.target.value))}
+                        className="w-full border rounded-xl px-4 py-3 text-slate-800 focus:ring-2 focus:ring-[#6366F1] outline-none border-slate-200"
+                     />
+                  </div>
+                  <div className="flex gap-3 pt-2">
+                     <button
+                        onClick={() => setViewMode('search')}
+                        className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-3 rounded-xl transition-colors"
+                     >
+                        Cancelar
+                     </button>
+                     <button
+                        onClick={handleRegister}
+                        disabled={regLoading}
+                        className="flex-1 bg-[#6366F1] hover:bg-[#5558dd] text-white font-bold py-3 rounded-xl transition-colors disabled:opacity-70 flex items-center justify-center gap-2"
+                     >
+                        {regLoading && <span className="material-icons-round animate-spin text-sm">sync</span>}
+                        Cadastrar
+                     </button>
+                  </div>
+               </div>
+            )}
+         </div>
+      </div>
+   );
 }
