@@ -117,12 +117,14 @@ function CustomerSelectionModal({
    isOpen, 
    onClose, 
    customers, 
-   onSelect 
+   onSelect,
+   onRegisterNew 
 }: { 
    isOpen: boolean; 
    onClose: () => void; 
    customers: any[]; 
    onSelect: (customer: any) => void; 
+   onRegisterNew?: () => void;
 }) {
    if (!isOpen) return null;
 
@@ -141,10 +143,10 @@ function CustomerSelectionModal({
             
             <div className="bg-blue-50 text-blue-700 p-3 rounded-lg text-sm mb-4 flex gap-2">
                <span className="material-icons-round text-base mt-0.5">info</span>
-               <p>Encontramos múltiplos cadastros com este telefone. Por favor, identifique qual é o seu.</p>
+               <p>Encontramos cadastros com este telefone. Identifique o seu ou crie um novo.</p>
             </div>
             
-            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1 custom-scrollbar">
+            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1 custom-scrollbar mb-4">
                {customers.map((c) => (
                   <button
                      key={c.id}
@@ -170,13 +172,23 @@ function CustomerSelectionModal({
                   </button>
                ))}
             </div>
+
+            {onRegisterNew && (
+               <button
+                  onClick={onRegisterNew}
+                  className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all active:scale-[0.98] border border-slate-200"
+               >
+                  <span className="material-icons-round text-slate-500">person_add</span>
+                  Não sou nenhum destes, quero cadastrar
+               </button>
+            )}
          </div>
       </div>
    );
 }
 
 // ─── Countdown Timer ─────────────────────────────────────────
-function CountdownTimer({ minutes, createdAt }: { minutes: number; createdAt?: Date | null }) {
+function CountdownTimer({ minutes, createdAt, onExpire }: { minutes: number; createdAt?: Date | null; onExpire?: () => void }) {
    const [secondsLeft, setSecondsLeft] = useState(minutes * 60);
 
    useEffect(() => {
@@ -191,10 +203,13 @@ function CountdownTimer({ minutes, createdAt }: { minutes: number; createdAt?: D
    }, [createdAt, minutes]);
 
    useEffect(() => {
-      if (secondsLeft <= 0) return;
+      if (secondsLeft <= 0) {
+         if (onExpire) onExpire();
+         return;
+      }
       const t = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
       return () => clearTimeout(t);
-   }, [secondsLeft]);
+   }, [secondsLeft, onExpire]);
 
    const m = Math.floor(secondsLeft / 60);
    const s = secondsLeft % 60;
@@ -334,6 +349,8 @@ export default function RafflePage() {
    const [socialNetworks, setSocialNetworks] = useState<any>(null);
    const [organizerPhone, setOrganizerPhone] = useState('');
    const [purchaseCreatedAt, setPurchaseCreatedAt] = useState<Date | null>(null);
+   const [showPurchaseSelectionModal, setShowPurchaseSelectionModal] = useState(false);
+   const [purchaseCandidates, setPurchaseCandidates] = useState<any[]>([]);
 
    // ─── Uniqueness Validation State ─────────────────────────────
    const [isCheckingUniqueness, setIsCheckingUniqueness] = useState(false);
@@ -982,28 +999,110 @@ export default function RafflePage() {
        setCpf(formatted);
    };
 
+   const onCustomerIdentified = async (customer: any) => {
+      setExistingCustomer(customer);
+      setName(customer.name);
+      setEmail(customer.email || '');
+      if (customer.cpf) setCpf(customer.cpf);
+      
+      // Se achou por CPF, garantir que o telefone no input seja o do cliente
+      // (Isso já foi tratado antes, mas é bom garantir se vier do modal)
+      if (phone.replace(/\D/g, '') !== customer.phone && customer.phone) {
+          setPhone(formatPhone(customer.phone));
+      }
+
+      // 1. Check for PENDING purchase first (Blocker)
+      const { data: pendingPurchase } = await supabase
+         .from('purchase_history')
+         .select('*, customers(*)')
+         .eq('customer_id', customer.id)
+         .eq('campaign_id', campaign.id)
+         .eq('status', 'pending')
+         .order('created_at', { ascending: false })
+         .limit(1)
+         .maybeSingle();
+
+      if (pendingPurchase) {
+         alert('Você possui uma compra pendente. Redirecionando para o pagamento...');
+         
+         setCurrentPurchaseId(pendingPurchase.id);
+         if (pendingPurchase.created_at) setPurchaseCreatedAt(new Date(pendingPurchase.created_at));
+         setSelectedTickets(pendingPurchase.tickets || []);
+         
+         if (pendingPurchase.payment_info) {
+             setPaymentData(pendingPurchase.payment_info);
+         }
+
+         if (activeMethod === 'n8n' && pendingPurchase.payment_info) {
+             setStep(7);
+         } else if (pendingPurchase.proof_url) {
+             setStep(4);
+         } else {
+             setStep(3);
+         }
+         return; 
+      }
+   };
+
+   // ─── Identity Check Logic ──────────────────────────────────
+   const checkIdentityAndShowModal = async (phoneValue: string): Promise<{modalOpened: boolean, found: boolean}> => {
+      const cleanVal = phoneValue.replace(/\D/g, '');
+      if (cleanVal.length < 10) return {modalOpened: false, found: false};
+
+      setPurchaseCandidates([]);
+      
+      try {
+         // 1. Busca por Telefone (prioridade) - Agora busca TODOS
+         const { data: phoneRes } = await supabase
+            .from('customers')
+            .select('*')
+            .eq('phone', cleanVal);
+            
+         if (phoneRes && phoneRes.length > 0) {
+             if (phoneRes.length > 1) {
+                 // Múltiplos encontrados: abre modal
+                 setPurchaseCandidates(phoneRes);
+                 setShowPurchaseSelectionModal(true);
+                 return {modalOpened: true, found: true};
+             }
+             // Apenas um encontrado
+             await onCustomerIdentified(phoneRes[0]);
+             return {modalOpened: false, found: true};
+         } 
+         
+         return {modalOpened: false, found: false};
+      } catch (err) {
+          console.error('Erro ao verificar identidade:', err);
+          return {modalOpened: false, found: false};
+      }
+   };
+
    const handlePhoneBlur = async () => {
       const cleanVal = phone.replace(/\D/g, '');
       if (cleanVal.length < 10) return; 
       
       setLookingUp(true);
-      try {
-         const formattedCpf = formatCpf(cleanVal);
-         let customer = null;
+      setShowPurchaseSelectionModal(false);
 
-         // 1. Busca por Telefone (prioridade)
-         const { data: phoneRes } = await supabase
-            .from('customers')
-            .select('*')
-            .eq('phone', cleanVal)
-            .limit(1)
-            .maybeSingle();
-            
-         if (phoneRes) {
-             customer = phoneRes;
-         } else if (cleanVal.length === 11) {
-             // 2. Busca por CPF (se não achou por telefone e tem 11 dígitos)
-             // Tenta formatado
+      try {
+         // 1. Check Phone Identity
+         const { modalOpened, found } = await checkIdentityAndShowModal(phone);
+         
+         if (modalOpened) {
+             setLookingUp(false);
+             return;
+         }
+         
+         if (found) {
+             // Customer found and identified (onCustomerIdentified called inside helper)
+             setLookingUp(false);
+             return;
+         }
+
+         // 2. Busca por CPF (se não achou por telefone)
+         let customer = null;
+         if (cleanVal.length === 11) {
+             const formattedCpf = formatCpf(cleanVal);
              const { data: cpfResFmt } = await supabase
                 .from('customers')
                 .select('*')
@@ -1014,7 +1113,6 @@ export default function RafflePage() {
              if (cpfResFmt) {
                  customer = cpfResFmt;
              } else {
-                 // Tenta limpo
                  const { data: cpfResClean } = await supabase
                     .from('customers')
                     .select('*')
@@ -1023,55 +1121,12 @@ export default function RafflePage() {
                     .maybeSingle();
                  customer = cpfResClean;
              }
-         } else {
          }
             
          if (customer) {
-            setExistingCustomer(customer);
-            setName(customer.name);
-            setEmail(customer.email || '');
-            if (customer.cpf) setCpf(customer.cpf);
-            
-            // Se achou por CPF, garantir que o telefone no input seja o do cliente
-            if (cleanVal !== customer.phone && customer.phone) {
-                setPhone(formatPhone(customer.phone));
-            }
-
-            // 1. Check for PENDING purchase first (Blocker)
-            const { data: pendingPurchase } = await supabase
-               .from('purchase_history')
-               .select('*, customers(*)')
-               .eq('customer_id', customer.id)
-               .eq('campaign_id', campaign.id)
-               .eq('status', 'pending')
-               .order('created_at', { ascending: false })
-               .limit(1)
-               .maybeSingle();
-
-            if (pendingPurchase) {
-               alert('Você possui uma compra pendente. Redirecionando para o pagamento...');
-               
-               setCurrentPurchaseId(pendingPurchase.id);
-               if (pendingPurchase.created_at) setPurchaseCreatedAt(new Date(pendingPurchase.created_at));
-               setSelectedTickets(pendingPurchase.tickets || []);
-               
-               if (pendingPurchase.payment_info) {
-                   setPaymentData(pendingPurchase.payment_info);
-               }
-
-               if (activeMethod === 'n8n' && pendingPurchase.payment_info) {
-                   setStep(7);
-               } else if (pendingPurchase.proof_url) {
-                   setStep(4);
-               } else {
-                   setStep(3);
-               }
-               return; 
-            }
+            await onCustomerIdentified(customer);
          } else {
             setExistingCustomer(null);
-            // Se não achou, pré-configura os campos para novo cadastro
-            // Só copia para CPF se parecer CPF (pontos) e não parecer telefone (parênteses)
             const hasDots = phone.includes('.');
             const hasParenthesis = phone.includes('(');
             
@@ -1084,6 +1139,7 @@ export default function RafflePage() {
          setLookingUp(false);
       }
    };
+
 
    const handleShowHistory = async () => {
       if (!existingCustomer) return;
@@ -1277,7 +1333,30 @@ export default function RafflePage() {
       }
    };
 
-   const handleStep1Continue = () => {
+   const handleStep1Continue = async () => {
+      // Se estamos no meio de uma seleção, não continuar
+      if (showPurchaseSelectionModal) return;
+
+      // Proteção contra condição de corrida: Se digitou telefone e clicou rápido
+      if (!existingCustomer && phone) {
+          const clean = phone.replace(/\D/g, '');
+          // Verifica se parece telefone (não é CPF) e tem tamanho suficiente
+          const isCpf = validateCpf(phone) || (phone.includes('.') && !phone.includes('('));
+          
+          if (!isCpf && clean.length >= 10) {
+              setLookingUp(true);
+              const { modalOpened, found } = await checkIdentityAndShowModal(phone);
+              setLookingUp(false);
+              
+              if (modalOpened) return; // Para tudo se abriu o modal
+              
+              if (found) {
+                  setStep(2);
+                  return;
+              }
+          }
+      }
+
       // Se já temos um cliente identificado, usamos os dados dele
       if (existingCustomer) {
          setPhone(formatPhone(existingCustomer.phone));
@@ -1553,6 +1632,27 @@ export default function RafflePage() {
          alert('Erro ao enviar comprovante. Tente novamente.');
       } finally {
          setUploading(false);
+      }
+   };
+
+   const handlePurchaseExpired = async () => {
+      if (!currentPurchaseId) return;
+
+      console.log('Tempo expirado. Cancelando compra:', currentPurchaseId);
+
+      try {
+         // Atualizar status no banco
+         await supabase
+            .from('purchase_history')
+            .update({ status: 'cancelled' })
+            .eq('id', currentPurchaseId);
+         
+         // Atualizar estado local
+         setStep(5);
+         setSelectedTickets([]);
+         setCurrentPurchaseId(null);
+      } catch (error) {
+         console.error('Erro ao cancelar compra expirada:', error);
       }
    };
 
@@ -1894,6 +1994,38 @@ export default function RafflePage() {
                   <TransactionHistoryButton />
                </div>
             </div>
+            
+            {/* Modal de Seleção (Compra) */}
+            <CustomerSelectionModal 
+               isOpen={showPurchaseSelectionModal}
+               onClose={() => setShowPurchaseSelectionModal(false)}
+               customers={purchaseCandidates}
+               onSelect={(customer) => {
+                  setShowPurchaseSelectionModal(false);
+                  onCustomerIdentified(customer);
+               }}
+               onRegisterNew={() => {
+                  setShowPurchaseSelectionModal(false);
+                  setExistingCustomer(null);
+                  
+                  // Tenta preservar apenas o que não for conflitante ou o que o usuário digitou
+                  const clean = phone.replace(/\D/g, '');
+                  if (validateCpf(phone)) {
+                      // Se digitou CPF, mantém no CPF e limpa telefone
+                      setCpf(formatCpf(clean));
+                      setPhone('');
+                  } else {
+                      // Se digitou Telefone, mantém no Telefone e limpa CPF
+                      setPhone(formatPhone(clean));
+                      setCpf('');
+                  }
+                  
+                  setName('');
+                  setEmail('');
+                  setStep(2); // Vai para o cadastro
+               }}
+            />
+
             {showHistory && (
                <HistoryModal
                   isOpen={showHistory}
@@ -2059,15 +2191,16 @@ export default function RafflePage() {
    if (step === 7) {
       console.log('[DEBUG] Step 7 renderizado - Aguardando Pagamento');
       
-      const expirationDate = new Date();
-      expirationDate.setMinutes(expirationDate.getMinutes() + paymentMinutes);
+      const expirationDate = purchaseCreatedAt 
+         ? new Date(purchaseCreatedAt.getTime() + paymentMinutes * 60000)
+         : new Date(Date.now() + paymentMinutes * 60000);
       
       return (
          <div className="bg-slate-50 min-h-screen font-sans pb-10">
             <Navbar />
             <div className="p-4 space-y-5 max-w-md mx-auto">
                <div className="flex flex-col items-center pt-2 pb-1">
-                  <CountdownTimer minutes={paymentMinutes} createdAt={purchaseCreatedAt} />
+                  <CountdownTimer minutes={paymentMinutes} createdAt={purchaseCreatedAt} onExpire={handlePurchaseExpired} />
                   <h2 className="text-2xl font-black text-slate-900 mt-4">Aguardando Pagamento</h2>
                   <p className="text-slate-500 text-sm mt-1 text-center">
                      Pague até <span className="font-bold text-slate-700">{expirationDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span> de hoje
@@ -2157,7 +2290,7 @@ export default function RafflePage() {
             <Navbar />
             <div className="p-4 space-y-5 max-w-md mx-auto">
                <div className="flex flex-col items-center pt-2 pb-1">
-                  <CountdownTimer minutes={paymentMinutes} />
+                  <CountdownTimer minutes={paymentMinutes} createdAt={purchaseCreatedAt} onExpire={handlePurchaseExpired} />
                   <h2 className="text-2xl font-black text-slate-900 mt-4">Pagamento manual</h2>
                   <p className="text-slate-400 text-sm mt-1">Finalize o pagamento para garantir suas cotas</p>
                </div>
