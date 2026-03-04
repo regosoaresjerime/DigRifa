@@ -3,6 +3,7 @@ import { useParams, useLocation } from 'react-router-dom';
 import { useCampaign } from '../context/CampaignContext';
 import { supabase } from '../lib/supabaseClient';
 import confetti from 'canvas-confetti';
+import { motion, AnimatePresence } from 'motion/react';
 
 // ─── Helpers ────────────────────────────────────────────────
 function formatPhone(value: string) {
@@ -355,6 +356,18 @@ export default function RafflePage() {
    // ─── Uniqueness Validation State ─────────────────────────────
    const [isCheckingUniqueness, setIsCheckingUniqueness] = useState(false);
    const [uniquenessErrors, setUniquenessErrors] = useState<{phone?: string, cpf?: string}>({});
+
+   // ─── Realtime Notifications State ────────────────────────────
+   const [notifications, setNotifications] = useState<{ id: string; message: string; type: 'success' | 'warning' }[]>([]);
+
+   const addNotification = (message: string, type: 'success' | 'warning' = 'success') => {
+      console.log('[DEBUG] Adicionando notificação:', message);
+      const id = Math.random().toString(36).substring(7);
+      setNotifications(prev => [...prev, { id, message, type }]);
+      setTimeout(() => {
+         setNotifications(prev => prev.filter(n => n.id !== id));
+      }, 5000);
+   };
 
    // ─── Edit State ──────────────────────────────────────────────
    const [isEditing, setIsEditing] = useState(false);
@@ -747,6 +760,135 @@ export default function RafflePage() {
          }
       }
    }, [slug, getCampaign]);
+
+   // ─── Realtime Subscription ───────────────────────────────────
+   useEffect(() => {
+      if (!campaign?.id) return;
+
+      console.log('Iniciando subscrição realtime para campanha:', campaign.id);
+
+      const channel = supabase
+         .channel(`public:purchase_history:${campaign.id}`)
+         .on(
+            'postgres_changes',
+            {
+               event: '*',
+               schema: 'public',
+               table: 'purchase_history',
+               filter: `campaign_id=eq.${campaign.id}`,
+            },
+            async (payload) => {
+               console.log('Realtime event received:', payload);
+               const { eventType, new: newRecord, old: oldRecord } = payload;
+
+               // Atualizar Status dos Bilhetes
+               if (eventType === 'INSERT' || eventType === 'UPDATE') {
+                  const record = newRecord as any;
+                  
+                  // Se foi cancelado, liberar os tickets
+                  if (record.status === 'cancelled') {
+                     setTicketsStatus((prev) => {
+                        const next = { ...prev };
+                        record.tickets.forEach((t: number) => {
+                           delete next[t];
+                        });
+                        return next;
+                     });
+                  } 
+                  // Se está pendente ou aprovado, reservar/marcar
+                  else if (record.status === 'pending' || record.status === 'approved') {
+                     const payTimeStr = campaign?.paymentTime || '1 hora';
+                     const payMinutes = parsePaymentTime(payTimeStr);
+                     const createdAt = new Date(record.created_at);
+                     const expiresAt = new Date(createdAt.getTime() + payMinutes * 60000);
+
+                     setTicketsStatus((prev) => {
+                        const next = { ...prev };
+                        record.tickets.forEach((t: number) => {
+                           next[t] = { status: record.status, expiresAt };
+                        });
+                        return next;
+                     });
+
+                     // Verificar conflito com seleção atual do usuário
+                     // Se o usuário selecionou um ticket que acabou de ser comprado por OUTRA pessoa
+                     if (currentPurchaseId !== record.id) { // Ignora se for a própria compra do usuário atualizando
+                         setSelectedTickets((prevSelected) => {
+                             const conflicts = prevSelected.filter(t => record.tickets.includes(t));
+                             if (conflicts.length > 0) {
+                                 // Remover tickets conflitantes da seleção
+                                 const newSelection = prevSelected.filter(t => !record.tickets.includes(t));
+                                 
+                                 // Notificar usuário sobre o conflito
+                                 if (conflicts.length === 1) {
+                                     addNotification(`O número ${conflicts[0]} acabou de ser reservado por outra pessoa!`, 'warning');
+                                 } else {
+                                     addNotification(`Alguns números selecionados (${conflicts.join(', ')}) acabaram de ser reservados!`, 'warning');
+                                 }
+                                 
+                                 return newSelection;
+                             }
+                             return prevSelected;
+                         });
+                     }
+
+                     // Notificação Social (Apenas para INSERT ou mudança para aprovado de outra pessoa)
+                     // Para evitar flood, notificamos apenas INSERT de 'pending' (reserva) ou 'approved' (compra direta)
+                     if (eventType === 'INSERT' && currentPurchaseId !== record.id) {
+                         // Buscar nome do comprador
+                         let firstName = 'Alguém';
+                         try {
+                             const { data: customerData, error } = await supabase
+                                 .from('customers')
+                                 .select('name')
+                                 .eq('id', record.customer_id)
+                                 .maybeSingle();
+                             
+                             if (!error && customerData?.name) {
+                                 firstName = customerData.name.split(' ')[0];
+                             } else {
+                                 console.warn('Não foi possível buscar nome do cliente (RLS ou não encontrado). Usando fallback.');
+                             }
+                         } catch (err) {
+                             console.error('Erro ao buscar nome para notificação:', err);
+                         }
+
+                         const action = record.status === 'approved' ? 'comprou' : 'reservou';
+                         const emoji = record.status === 'approved' ? '🚀' : '🔥';
+                         
+                         addNotification(`${firstName} acabou de ${action}! ${emoji}`, 'success');
+                     }
+                  }
+               }
+               // Handle DELETE (raro, mas possível admin deletar compra)
+               else if (eventType === 'DELETE') {
+                   const record = oldRecord as any;
+                   if (record?.tickets) {
+                       setTicketsStatus((prev) => {
+                           const next = { ...prev };
+                           record.tickets.forEach((t: number) => {
+                               delete next[t];
+                           });
+                           return next;
+                       });
+                   }
+               }
+            }
+         )
+         .subscribe();
+
+      return () => {
+         supabase.removeChannel(channel);
+      };
+   }, [campaign?.id, currentPurchaseId]); // Dependência do currentPurchaseId para evitar conflito com a própria compra
+
+   // Monitorar perda de tickets durante o checkout (conflito)
+   useEffect(() => {
+       if (step > 0 && step < 3 && selectedTickets.length === 0) {
+           alert('Todas as cotas selecionadas foram reservadas por outra pessoa.');
+           setStep(0);
+       }
+   }, [selectedTickets, step]);
 
    // ─── Derived State (Moved up for safety) ───────────────────
    const totalNumbers = campaign?.ticketQuantity || 0;
@@ -1433,6 +1575,12 @@ export default function RafflePage() {
       const e = validateStep2();
       if (Object.keys(e).length > 0) { setErrors(e); return; }
 
+      if (selectedTickets.length === 0) {
+          alert('Selecione pelo menos uma cota.');
+          setStep(0);
+          return;
+      }
+
       const cleanPhone = phone.replace(/\D/g, '');
       const cleanCpf = cpf.replace(/\D/g, '');
       const formattedCpf = cleanCpf ? formatCpf(cleanCpf) : null;
@@ -1659,6 +1807,42 @@ export default function RafflePage() {
    // ═══════════════════════════════════════════════════════════
    // RENDER: Helpers
    // ═══════════════════════════════════════════════════════════
+   const NotificationToast = () => (
+      <div className="fixed top-20 right-4 z-[9999] flex flex-col gap-2 pointer-events-none">
+         <AnimatePresence>
+            {notifications.map((n) => (
+               <motion.div
+                  key={n.id}
+                  initial={{ opacity: 0, x: 50, scale: 0.9 }}
+                  animate={{ opacity: 1, x: 0, scale: 1 }}
+                  exit={{ opacity: 0, x: 20, scale: 0.9 }}
+                  layout
+                  className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border backdrop-blur-md max-w-xs ${
+                     n.type === 'success' 
+                        ? 'bg-emerald-50/90 border-emerald-200 text-emerald-800' 
+                        : 'bg-amber-50/90 border-amber-200 text-amber-800'
+                  }`}
+               >
+                  <span className={`material-icons-round text-lg ${
+                     n.type === 'success' ? 'text-emerald-500' : 'text-amber-500'
+                  }`}>
+                     {n.type === 'success' ? 'verified' : 'warning'}
+                  </span>
+                  <div className="flex-1">
+                     <p className="text-sm font-bold leading-tight">{n.message}</p>
+                  </div>
+                  <button 
+                     onClick={() => setNotifications(prev => prev.filter(item => item.id !== n.id))}
+                     className="opacity-50 hover:opacity-100 transition-opacity"
+                  >
+                     <span className="material-icons-round text-sm">close</span>
+                  </button>
+               </motion.div>
+            ))}
+         </AnimatePresence>
+      </div>
+   );
+
    const Navbar = () => (
       <header className="bg-white px-4 py-3 flex justify-between items-center sticky top-0 z-50 shadow-sm border-b border-slate-100">
          <div className="flex items-center gap-1">
@@ -1797,6 +1981,7 @@ export default function RafflePage() {
       // ... Same Step 0 content ...
       return (
          <div className="bg-white min-h-screen font-sans pb-28">
+            <NotificationToast />
             <Navbar />
             {/* ... (Main Image Carousel) ... */}
             <div className="w-full aspect-video bg-slate-900 relative border-b border-slate-800 overflow-hidden">
@@ -1951,6 +2136,7 @@ export default function RafflePage() {
       // ... Same Step 1 content ...
       return (
          <div className="bg-slate-50 min-h-screen font-sans">
+            <NotificationToast />
             <Navbar />
             <div className="p-4 space-y-4 max-w-md mx-auto">
                <CheckoutHeader />
@@ -2043,6 +2229,7 @@ export default function RafflePage() {
    if (step === 2) {
       return (
          <div className="bg-slate-50 min-h-screen font-sans">
+            <NotificationToast />
             <Navbar />
             <div className="p-4 space-y-4 max-w-md mx-auto">
                <CheckoutHeader />
@@ -2197,6 +2384,7 @@ export default function RafflePage() {
       
       return (
          <div className="bg-slate-50 min-h-screen font-sans pb-10">
+            <NotificationToast />
             <Navbar />
             <div className="p-4 space-y-5 max-w-md mx-auto">
                <div className="flex flex-col items-center pt-2 pb-1">
@@ -2287,6 +2475,7 @@ export default function RafflePage() {
       };
       return (
          <div className="bg-slate-50 min-h-screen font-sans pb-10">
+            <NotificationToast />
             <Navbar />
             <div className="p-4 space-y-5 max-w-md mx-auto">
                <div className="flex flex-col items-center pt-2 pb-1">
@@ -2386,6 +2575,7 @@ export default function RafflePage() {
    if (step === 4) {
       return (
          <div className="bg-slate-50 min-h-screen font-sans pb-10">
+            <NotificationToast />
             <Navbar />
             <div className="p-4 space-y-5 max-w-md mx-auto">
                <div className="flex flex-col items-center pt-4 pb-2">
@@ -2408,6 +2598,7 @@ export default function RafflePage() {
    if (step === 5) {
       return (
          <div className="bg-[#121212] min-h-screen font-sans pb-10 flex flex-col items-center justify-center p-4">
+            <NotificationToast />
             <div className="w-full max-w-md bg-[#1E1E1E] rounded-3xl border border-red-900/30 p-6 text-center relative overflow-hidden shadow-2xl">
                <div className="absolute inset-0 bg-gradient-to-b from-red-500/10 to-transparent pointer-events-none" />
                <div className="w-20 h-20 bg-gradient-to-br from-red-500 to-red-600 rounded-2xl mx-auto mb-6 flex items-center justify-center shadow-lg shadow-red-500/30 rotate-3">
@@ -2436,6 +2627,7 @@ export default function RafflePage() {
       
       return (
          <div className="bg-[#0f172a] min-h-screen font-sans flex flex-col items-center justify-center p-4 relative">
+            <NotificationToast />
             <div className="w-full max-w-md bg-white rounded-3xl overflow-hidden shadow-2xl relative z-10">
                {/* Header Verde */}
                <div className="bg-emerald-500 p-8 text-center relative overflow-hidden">
