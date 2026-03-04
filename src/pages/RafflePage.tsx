@@ -381,6 +381,36 @@ export default function RafflePage() {
    const phoneRef = useRef<HTMLInputElement>(null);
    const fileInputRef = useRef<HTMLInputElement>(null);
 
+   // Hook para confetti quando step === 6
+   useEffect(() => {
+      if (step === 6) {
+         console.log('[DEBUG] Step 6 useEffect executado, iniciando confetti');
+         const duration = 3000;
+         const end = Date.now() + duration;
+
+         (function frame() {
+            confetti({
+               particleCount: 4,
+               angle: 60,
+               spread: 55,
+               origin: { x: 0 },
+               colors: ['#22c55e', '#10b981', '#ffffff']
+            });
+            confetti({
+               particleCount: 4,
+               angle: 120,
+               spread: 55,
+               origin: { x: 1 },
+               colors: ['#22c55e', '#10b981', '#ffffff']
+            });
+
+            if (Date.now() < end) {
+               requestAnimationFrame(frame);
+            }
+         }());
+      }
+   }, [step]); // Executa sempre que step mudar
+
    // ─── Claim Prize Handler ────────────────────────────────────
    const handleOpenClaimModal = (winner: any) => {
       setClaimWinnerData(winner);
@@ -658,9 +688,33 @@ export default function RafflePage() {
    // ─── Scheduled Status Checks for N8N Payment ────────────────
    const [checkStatusText, setCheckStatusText] = useState('Verificando manualmente...');
 
-   // Polling removido conforme solicitação. O usuário deve clicar para verificar.
-   // Mantemos apenas a lógica de expiração visual se necessário, ou removemos também.
-   // Vou remover o useEffect de polling completo.
+   // Polling automático a cada 30 segundos
+   useEffect(() => {
+      console.log('[DEBUG] Polling useEffect executado. Step:', step, 'currentPurchaseId:', currentPurchaseId);
+      
+      if (step !== 7 || !currentPurchaseId) {
+         console.log('[DEBUG] Polling não ativado. Condições não atendidas.');
+         return;
+      }
+
+      console.log('[DEBUG] Polling ativado! Iniciando intervalo...');
+
+      const checkStatus = async () => {
+         console.log('[DEBUG] Polling: Verificando status...');
+         setCheckStatusText('Verificando status...');
+         await fetchPurchaseDetails(currentPurchaseId);
+         setTimeout(() => setCheckStatusText('Verificando manualmente...'), 2000);
+      };
+
+      const intervalId = setInterval(checkStatus, 30000); // 30 segundos
+      console.log('[DEBUG] Intervalo configurado com ID:', intervalId);
+
+      return () => {
+         console.log('[DEBUG] Limpando intervalo:', intervalId);
+         clearInterval(intervalId);
+      };
+   // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [step, currentPurchaseId]);
 
    const handleManualCheck = async () => {
        const idPix = paymentData?.id_pix || paymentData?.['id-pix'];
@@ -743,6 +797,7 @@ export default function RafflePage() {
    };
 
    const fetchPurchaseDetails = async (pid: string) => {
+      console.log('[DEBUG] fetchPurchaseDetails iniciado com ID:', pid);
       try {
          const { data: purchase, error } = await supabase
             .from('purchase_history')
@@ -750,10 +805,19 @@ export default function RafflePage() {
             .eq('id', pid)
             .maybeSingle();
 
+         console.log('[DEBUG] Supabase resposta:', { data: purchase, error });
+
          if (error || !purchase) {
-            console.error('Erro ao buscar detalhes da compra:', error);
+            console.error('[DEBUG] Erro ao buscar detalhes da compra:', error);
             return;
          }
+
+         console.log('[DEBUG] Compra encontrada:', {
+            id: purchase.id,
+            status: purchase.status,
+            payment_info: purchase.payment_info,
+            proof_url: purchase.proof_url
+         });
 
          setCurrentPurchaseId(purchase.id);
          if (purchase.created_at) setPurchaseCreatedAt(new Date(purchase.created_at));
@@ -771,21 +835,47 @@ export default function RafflePage() {
              setPaymentData(purchase.payment_info);
          }
 
+         console.log('[DEBUG] Status da compra:', purchase.status);
+         console.log('[DEBUG] Active method:', activeMethod);
+
          if (purchase.status === 'cancelled') {
-            setStep(5);
+            console.log('[DEBUG] Status é cancelled, mudando para Step 5');
+            setTimeout(() => {
+               console.log('[DEBUG] Executando setStep(5)');
+               setStep(5);
+            }, 100);
          } else if (purchase.status === 'approved') {
-            setStep(6);
+            console.log('[DEBUG] Status é approved, mudando para Step 6');
+            setTimeout(() => {
+               console.log('[DEBUG] Executando setStep(6)');
+               setStep(6);
+            }, 100);
          } else if (purchase.status === 'pending') {
+            console.log('[DEBUG] Status é pending, verificando método de pagamento');
             if (activeMethod === 'n8n' && purchase.payment_info) {
-                setStep(7); // N8N Payment
+                console.log('[DEBUG] Método N8N com payment_info, mudando para Step 7');
+                setTimeout(() => {
+                   console.log('[DEBUG] Executando setStep(7)');
+                   setStep(7); // N8N Payment
+                }, 100);
             } else if (purchase.proof_url) {
-               setStep(4); // Comprovante enviado
+               console.log('[DEBUG] Tem proof_url, mudando para Step 4');
+               setTimeout(() => {
+                  console.log('[DEBUG] Executando setStep(4)');
+                  setStep(4); // Comprovante enviado
+               }, 100);
             } else {
-               setStep(3); // Aguardando pagamento/upload (Manual)
+               console.log('[DEBUG] Método manual, mudando para Step 3');
+               setTimeout(() => {
+                  console.log('[DEBUG] Executando setStep(3)');
+                  setStep(3); // Aguardando pagamento/upload (Manual)
+               }, 100);
             }
+         } else {
+            console.log('[DEBUG] Status desconhecido:', purchase.status);
          }
       } catch (err) {
-         console.error('Erro ao processar compra da URL:', err);
+         console.error('[DEBUG] Erro ao processar compra da URL:', err);
       }
    };
 
@@ -1457,6 +1547,8 @@ export default function RafflePage() {
    // VIEW ROUTING
    // ═══════════════════════════════════════════════════════════
 
+   console.log('[DEBUG] VIEW ROUTING - Step atual:', step, 'isCelebration:', isCelebration);
+
    if (!campaign) {
       return (
          <div className="min-h-screen flex items-center justify-center bg-white font-sans">
@@ -1875,6 +1967,8 @@ export default function RafflePage() {
    // STEP 7 — Pagamento Automático N8N (NOVO)
    // ═══════════════════════════════════════════════════════════
    if (step === 7) {
+      console.log('[DEBUG] Step 7 renderizado - Aguardando Pagamento');
+      
       const expirationDate = new Date();
       expirationDate.setMinutes(expirationDate.getMinutes() + paymentMinutes);
       
@@ -2115,32 +2209,8 @@ export default function RafflePage() {
    }
 
    if (step === 6) {
-      useEffect(() => {
-         const duration = 3000;
-         const end = Date.now() + duration;
-
-         (function frame() {
-            confetti({
-               particleCount: 4,
-               angle: 60,
-               spread: 55,
-               origin: { x: 0 },
-               colors: ['#22c55e', '#10b981', '#ffffff']
-            });
-            confetti({
-               particleCount: 4,
-               angle: 120,
-               spread: 55,
-               origin: { x: 1 },
-               colors: ['#22c55e', '#10b981', '#ffffff']
-            });
-
-            if (Date.now() < end) {
-               requestAnimationFrame(frame);
-            }
-         }());
-      }, []);
-
+      console.log('[DEBUG] Step 6 renderizado! Confetti será exibido.');
+      
       return (
          <div className="bg-[#0f172a] min-h-screen font-sans flex flex-col items-center justify-center p-4 relative">
             <div className="w-full max-w-md bg-white rounded-3xl overflow-hidden shadow-2xl relative z-10">
