@@ -2296,7 +2296,6 @@ function PhoneConsultModal({
    loading: boolean;
    onFinalizePurchase: (purchaseId: string) => void;
 }) {
-   const [searchMode, setSearchMode] = useState<'phone' | 'cpf'>('phone');
    const [viewMode, setViewMode] = useState<'search' | 'register'>('search');
    
    // Registration State
@@ -2373,7 +2372,6 @@ function PhoneConsultModal({
          // Better: Just reset view and let user search, or auto-search.
          
          setViewMode('search');
-         setSearchMode('phone');
          onPhoneChange(formatPhone(cleanPhone));
          // We need to trigger the search in parent. The parent uses onPhoneBlur.
          // Let's manually trigger it or ask user to click search.
@@ -2406,35 +2404,28 @@ function PhoneConsultModal({
             {viewMode === 'search' ? (
                <>
                   <div className="p-4 border-b border-slate-100 space-y-3">
-                     {/* Toggle Search Mode */}
-                     <div className="flex bg-slate-100 p-1 rounded-xl">
-                        <button 
-                           onClick={() => { setSearchMode('phone'); onPhoneChange(''); }}
-                           className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${searchMode === 'phone' ? 'bg-white text-[#6366F1] shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                           Telefone
-                        </button>
-                        <button 
-                           onClick={() => { setSearchMode('cpf'); onPhoneChange(''); }}
-                           className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${searchMode === 'cpf' ? 'bg-white text-[#6366F1] shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                        >
-                           CPF
-                        </button>
-                     </div>
-
                      <div>
                         <label className="block text-sm font-bold text-slate-700 mb-2">
-                           {searchMode === 'phone' ? 'Informe seu telefone' : 'Informe seu CPF'}
+                           Informe seu Telefone ou CPF
                         </label>
                         <div className="flex gap-2">
                            <input
                               type="tel"
                               inputMode="numeric"
-                              placeholder={searchMode === 'phone' ? '(99) 99999-9999' : '000.000.000-00'}
+                              placeholder="(99) 99999-9999 ou CPF"
                               value={phone}
                               onChange={(e) => {
                                  const v = e.target.value;
-                                 onPhoneChange(searchMode === 'phone' ? formatPhone(v) : formatCpf(v));
+                                 const clean = v.replace(/\D/g, '');
+                                 
+                                 // Smart formatting
+                                 if (v.includes('.') && !v.includes('(')) {
+                                    onPhoneChange(formatCpf(v));
+                                 } else if (clean.length === 11 && validateCpf(clean)) {
+                                    onPhoneChange(formatCpf(v));
+                                 } else {
+                                    onPhoneChange(formatPhone(v));
+                                 }
                               }}
                               className="flex-1 border rounded-xl px-4 py-3 text-slate-800 text-base focus:ring-2 focus:ring-[#6366F1] focus:border-transparent outline-none placeholder-slate-300 border-slate-200"
                            />
@@ -2467,8 +2458,14 @@ function PhoneConsultModal({
                            <button 
                               onClick={() => {
                                  setViewMode('register');
-                                 if (searchMode === 'phone') setRegPhone(phone);
-                                 if (searchMode === 'cpf') setRegCpf(phone);
+                                 const clean = phone.replace(/\D/g, '');
+                                 if (validateCpf(clean)) {
+                                    setRegCpf(formatCpf(clean));
+                                    setRegPhone('');
+                                 } else {
+                                    setRegPhone(formatPhone(clean));
+                                    setRegCpf('');
+                                 }
                               }}
                               className="bg-[#6366F1] text-white px-6 py-2.5 rounded-xl font-bold hover:bg-[#5558dd] transition-colors text-sm shadow-lg shadow-indigo-500/20"
                            >
