@@ -302,7 +302,7 @@ export default function RafflePage() {
                } else {
                    let query = supabase.from('customers').select('id').eq('phone', cleanPhone);
                    if (existingCustomer) query = query.neq('id', existingCustomer.id);
-                   const { data } = await query.maybeSingle();
+                   const { data } = await query.limit(1).maybeSingle();
                    if (data) errors.phone = 'Telefone já cadastrado em outra conta.';
                }
             }
@@ -320,7 +320,7 @@ export default function RafflePage() {
                    // 1. Tenta Formatado
                    let query1 = supabase.from('customers').select('id').eq('cpf', formattedCpf);
                    if (existingCustomer) query1 = query1.neq('id', existingCustomer.id);
-                   const { data: d1 } = await query1.maybeSingle();
+                   const { data: d1 } = await query1.limit(1).maybeSingle();
                    
                    if (d1) {
                        found = true;
@@ -328,7 +328,7 @@ export default function RafflePage() {
                        // 2. Tenta Limpo
                        let query2 = supabase.from('customers').select('id').eq('cpf', cleanCpf);
                        if (existingCustomer) query2 = query2.neq('id', existingCustomer.id);
-                       const { data: d2 } = await query2.maybeSingle();
+                       const { data: d2 } = await query2.limit(1).maybeSingle();
                        if (d2) found = true;
                    }
                    
@@ -930,6 +930,7 @@ export default function RafflePage() {
             .from('customers')
             .select('*')
             .eq('phone', cleanVal)
+            .limit(1)
             .maybeSingle();
             
          if (phoneRes) {
@@ -941,6 +942,7 @@ export default function RafflePage() {
                 .from('customers')
                 .select('*')
                 .eq('cpf', formattedCpf)
+                .limit(1)
                 .maybeSingle();
                 
              if (cpfResFmt) {
@@ -951,9 +953,11 @@ export default function RafflePage() {
                     .from('customers')
                     .select('*')
                     .eq('cpf', cleanVal)
+                    .limit(1)
                     .maybeSingle();
                  customer = cpfResClean;
              }
+         } else {
          }
             
          if (customer) {
@@ -1068,6 +1072,7 @@ export default function RafflePage() {
             .from('customers')
             .select('*')
             .or(`phone.eq.${cleanVal},cpf.eq.${formattedCpf},cpf.eq.${cleanVal}`) // Tenta todas as variações
+            .limit(1)
             .maybeSingle();
          
          console.log('Resultado da busca:', customerFound, 'Erro:', searchError);
@@ -1288,17 +1293,17 @@ export default function RafflePage() {
       // Validação de duplicidade e atualização
       if (!existingCustomer) {
          // Novo cliente: verificar se telefone ou CPF já existem
-         const { data: phoneCheck } = await supabase.from('customers').select('id').eq('phone', cleanPhone).maybeSingle();
+         const { data: phoneCheck } = await supabase.from('customers').select('id').eq('phone', cleanPhone).limit(1).maybeSingle();
          if (phoneCheck) { setErrors({ phone: 'Este telefone já possui cadastro. Faça login.' }); return; }
          
          if (cleanCpf) {
-             const { data: cpfCheck } = await supabase.from('customers').select('id').or(`cpf.eq.${formattedCpf},cpf.eq.${cleanCpf}`).maybeSingle();
+             const { data: cpfCheck } = await supabase.from('customers').select('id').or(`cpf.eq.${formattedCpf},cpf.eq.${cleanCpf}`).limit(1).maybeSingle();
              if (cpfCheck) { setErrors({ cpf: 'Este CPF já está vinculado a outra conta.' }); return; }
          }
       } else {
          // Cliente existente: verificar se mudou o telefone para um já existente
          if (cleanPhone !== existingCustomer.phone) {
-             const { data: phoneCheck } = await supabase.from('customers').select('id').eq('phone', cleanPhone).neq('id', existingCustomer.id).maybeSingle();
+             const { data: phoneCheck } = await supabase.from('customers').select('id').eq('phone', cleanPhone).neq('id', existingCustomer.id).limit(1).maybeSingle();
              if (phoneCheck) { setErrors({ phone: 'Este telefone já está em uso por outra conta.' }); return; }
          }
       }
