@@ -113,6 +113,68 @@ function TermsModal({ description, onClose }: { description: string; onClose: ()
    );
 }
 
+function CustomerSelectionModal({ 
+   isOpen, 
+   onClose, 
+   customers, 
+   onSelect 
+}: { 
+   isOpen: boolean; 
+   onClose: () => void; 
+   customers: any[]; 
+   onSelect: (customer: any) => void; 
+}) {
+   if (!isOpen) return null;
+
+   return (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+         <div className="bg-white w-full max-w-md rounded-2xl p-6 m-4 shadow-2xl animate-in fade-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+               <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <span className="material-icons-round text-[#6366F1]">people</span>
+                  Selecione seu cadastro
+               </h3>
+               <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+                  <span className="material-icons-round text-slate-500">close</span>
+               </button>
+            </div>
+            
+            <div className="bg-blue-50 text-blue-700 p-3 rounded-lg text-sm mb-4 flex gap-2">
+               <span className="material-icons-round text-base mt-0.5">info</span>
+               <p>Encontramos múltiplos cadastros com este telefone. Por favor, identifique qual é o seu.</p>
+            </div>
+            
+            <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1 custom-scrollbar">
+               {customers.map((c) => (
+                  <button
+                     key={c.id}
+                     onClick={() => onSelect(c)}
+                     className="w-full text-left p-4 rounded-xl border border-slate-200 hover:border-[#6366F1] hover:bg-slate-50 transition-all group relative overflow-hidden"
+                  >
+                     <div className="flex items-center gap-3 relative z-10">
+                        <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-500 font-bold group-hover:bg-[#6366F1] group-hover:text-white transition-colors">
+                           {c.name ? c.name.charAt(0).toUpperCase() : '?'}
+                        </div>
+                        <div>
+                           <div className="font-bold text-slate-800 group-hover:text-[#6366F1] transition-colors">{c.name}</div>
+                           <div className="text-xs text-slate-500 flex items-center gap-2 mt-0.5">
+                              <span className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 font-medium">
+                                 CPF: {c.cpf ? `***.${c.cpf.substr(4, 3)}.${c.cpf.substr(8, 3)}-**` : 'Não informado'}
+                              </span>
+                           </div>
+                        </div>
+                        <div className="ml-auto">
+                           <span className="material-icons-round text-slate-300 group-hover:text-[#6366F1] transition-colors">chevron_right</span>
+                        </div>
+                     </div>
+                  </button>
+               ))}
+            </div>
+         </div>
+      </div>
+   );
+}
+
 // ─── Countdown Timer ─────────────────────────────────────────
 function CountdownTimer({ minutes, createdAt }: { minutes: number; createdAt?: Date | null }) {
    const [secondsLeft, setSecondsLeft] = useState(minutes * 60);
@@ -259,6 +321,8 @@ export default function RafflePage() {
    }, [showPhoneModal]);
    const [consultPhone, setConsultPhone] = useState('');
    const [consultCustomer, setConsultCustomer] = useState<any>(null);
+   const [consultCustomers, setConsultCustomers] = useState<any[]>([]); // Lista para seleção
+   const [showConsultSelectionModal, setShowConsultSelectionModal] = useState(false); // Controle do modal de seleção
    const [consultHistory, setConsultHistory] = useState<any[]>([]);
    const [loadingHistory, setLoadingHistory] = useState(false);
    const [proofFile, setProofFile] = useState<File | null>(null);
@@ -296,6 +360,7 @@ export default function RafflePage() {
          
          try {
             // Check Phone Uniqueness
+            /* REMOVIDO PARA PERMITIR DUPLICIDADE DE TELEFONE
             if (cleanPhone.length >= 10) {
                if (existingCustomer && cleanPhone === existingCustomer.phone) {
                    // OK
@@ -306,6 +371,7 @@ export default function RafflePage() {
                    if (data) errors.phone = 'Telefone já cadastrado em outra conta.';
                }
             }
+            */
             
             // Check CPF Uniqueness
             if (cleanCpf.length === 11) {
@@ -1035,68 +1101,68 @@ export default function RafflePage() {
       setConsultPhone(v);
    };
 
+   const loadCustomerHistory = async (customer: any) => {
+         setConsultCustomer(customer);
+         console.log('Cliente selecionado:', customer);
+         setLoadingHistory(true);
+         
+         try {
+             // Buscar histórico de compras da campanha vigente
+             const { data: history, error: historyError } = await supabase
+                .from('purchase_history')
+                .select('*')
+                .eq('customer_id', customer.id)
+                .eq('campaign_id', campaign.id)
+                .order('created_at', { ascending: false });
+             
+             console.log('Histórico encontrado:', history, 'Erro:', historyError);
+             setConsultHistory(history || []);
+         } catch (error) {
+             console.error('Erro ao carregar histórico:', error);
+         } finally {
+             setLoadingHistory(false);
+             setShowConsultSelectionModal(false);
+         }
+   };
+
    const handleConsultPhoneBlur = async () => {
       const cleanVal = consultPhone.replace(/\D/g, '');
       if (cleanVal.length < 11) return; // Mínimo aceitável
       
       console.log('Iniciando consulta para:', cleanVal);
       setLoadingHistory(true);
+      setConsultCustomer(null);
+      setConsultHistory([]);
+      
       try {
-         // Buscar cliente por Telefone OU CPF
-         const { data: customer, error: customerError } = await supabase
-            .from('customers')
-            .select('*')
-            .or(`phone.eq.${cleanVal},cpf.eq.${formatCpf(cleanVal)}`) // Tenta raw phone ou CPF formatado? 
-            // Melhor: Tenta phone raw e CPF raw (se salvo raw no banco). 
-            // O código de salvamento usa: phone: rawPhone, cpf: cpf.trim() (que é formatado no state).
-            // Vou verificar como o CPF é salvo.
-            // No handleFinalize: setCpf(formatCpf(v)).
-            // upsert({ cpf: cpf.trim() || null }) -> Salva formatado?
-            // A função formatCpf retorna formatado "000.000.000-00".
-            // Então no banco deve estar formatado.
-            // Vou tentar buscar pelo CPF formatado também.
-            .maybeSingle();
-            
-         // Ajuste na query:
-         // Se cleanVal for CPF, formatCpf(cleanVal) gera o formato.
-         // Se cleanVal for Phone, usa cleanVal.
-         // A query .or aceita string crua.
-         
-         // Mas espere, se eu busco por CPF, tenho que enviar formatado se no banco estiver formatado.
-         // Se eu busco por telefone, envio limpo.
-         // Vou fazer duas queries ou usar .or com os dois formatos.
-         
          const formattedCpf = formatCpf(cleanVal);
          
-         const { data: customerFound, error: searchError } = await supabase
+         const { data: customers, error: searchError } = await supabase
             .from('customers')
             .select('*')
-            .or(`phone.eq.${cleanVal},cpf.eq.${formattedCpf},cpf.eq.${cleanVal}`) // Tenta todas as variações
-            .limit(1)
-            .maybeSingle();
+            .or(`phone.eq.${cleanVal},cpf.eq.${formattedCpf},cpf.eq.${cleanVal}`); // Tenta todas as variações
          
-         console.log('Resultado da busca:', customerFound, 'Erro:', searchError);
+         console.log('Resultado da busca:', customers, 'Erro:', searchError);
          
-         if (!customerFound) {
+         if (!customers || customers.length === 0) {
             // Cliente não encontrado - O modal vai mostrar o botão de cadastro
             setConsultCustomer(null);
             setConsultHistory([]);
+            setLoadingHistory(false);
             return;
          }
          
-         setConsultCustomer(customerFound);
-         console.log('Cliente encontrado:', customerFound);
+         // Se encontrou mais de um cliente (mesmo telefone), abre modal de seleção
+         if (customers.length > 1) {
+             setConsultCustomers(customers);
+             setShowConsultSelectionModal(true);
+             setLoadingHistory(false);
+             return;
+         }
          
-         // Buscar histórico de compras da campanha vigente
-         const { data: history, error: historyError } = await supabase
-            .from('purchase_history')
-            .select('*')
-            .eq('customer_id', customerFound.id)
-            .eq('campaign_id', campaign.id)
-            .order('created_at', { ascending: false });
-         
-         console.log('Histórico encontrado:', history, 'Erro:', historyError);
-         setConsultHistory(history || []);
+         // Se encontrou apenas 1, carrega direto
+         const customerFound = customers[0];
+         await loadCustomerHistory(customerFound);
          
       } catch (error) {
          console.error('Erro ao consultar histórico:', error);
@@ -1157,6 +1223,7 @@ export default function RafflePage() {
          const cleanPhone = phone.replace(/\D/g, '');
          
          // Validar unicidade do telefone antes de atualizar
+         /* REMOVIDO PARA PERMITIR DUPLICIDADE DE TELEFONE
          if (cleanPhone !== existingCustomer.phone) {
             const { data: phoneCheck } = await supabase
                .from('customers')
@@ -1171,6 +1238,7 @@ export default function RafflePage() {
                return;
             }
          }
+         */
          
          // Atualizar no banco
          const { error } = await supabase
@@ -1292,19 +1360,17 @@ export default function RafflePage() {
 
       // Validação de duplicidade e atualização
       if (!existingCustomer) {
-         // Novo cliente: verificar se telefone ou CPF já existem
-         const { data: phoneCheck } = await supabase.from('customers').select('id').eq('phone', cleanPhone).limit(1).maybeSingle();
-         if (phoneCheck) { setErrors({ phone: 'Este telefone já possui cadastro. Faça login.' }); return; }
+         // Novo cliente: verificar apenas CPF duplicado (telefone pode repetir)
          
          if (cleanCpf) {
              const { data: cpfCheck } = await supabase.from('customers').select('id').or(`cpf.eq.${formattedCpf},cpf.eq.${cleanCpf}`).limit(1).maybeSingle();
              if (cpfCheck) { setErrors({ cpf: 'Este CPF já está vinculado a outra conta.' }); return; }
          }
       } else {
-         // Cliente existente: verificar se mudou o telefone para um já existente
-         if (cleanPhone !== existingCustomer.phone) {
-             const { data: phoneCheck } = await supabase.from('customers').select('id').eq('phone', cleanPhone).neq('id', existingCustomer.id).limit(1).maybeSingle();
-             if (phoneCheck) { setErrors({ phone: 'Este telefone já está em uso por outra conta.' }); return; }
+         // Cliente existente: verificar se mudou o CPF para um já existente
+         if (cleanCpf && cleanCpf !== existingCustomer.cpf) {
+             const { data: cpfCheck } = await supabase.from('customers').select('id').or(`cpf.eq.${formattedCpf},cpf.eq.${cleanCpf}`).neq('id', existingCustomer.id).limit(1).maybeSingle();
+             if (cpfCheck) { setErrors({ cpf: 'Este CPF já está vinculado a outra conta.' }); return; }
          }
       }
 
@@ -1316,7 +1382,18 @@ export default function RafflePage() {
          let customer;
          const rawPhone = cleanPhone;
 
+         // Verificar se devemos criar novo ou atualizar
+         // Se existingCustomer existe, mas o CPF foi alterado para um NOVO, então é um NOVO cadastro
+         let shouldCreateNew = !existingCustomer;
          if (existingCustomer) {
+             const currentCpfClean = existingCustomer.cpf ? existingCustomer.cpf.replace(/\D/g, '') : '';
+             // Se tinha CPF e agora mudou para outro (que não é vazio), então é novo cliente
+             if (currentCpfClean && cleanCpf && cleanCpf !== currentCpfClean) {
+                 shouldCreateNew = true;
+             }
+         }
+
+         if (!shouldCreateNew) {
              // Atualizar cliente existente
              const { data, error } = await supabase
                 .from('customers')
@@ -1688,6 +1765,14 @@ export default function RafflePage() {
                history={consultHistory}
                loading={loadingHistory}
                onFinalizePurchase={handleFinalizePendingPurchase}
+            />
+
+            {/* Modal de Seleção de Cliente (Múltiplos Encontrados) */}
+            <CustomerSelectionModal 
+               isOpen={showConsultSelectionModal}
+               onClose={() => setShowConsultSelectionModal(false)}
+               customers={consultCustomers}
+               onSelect={loadCustomerHistory}
             />
 
             {/* History Modal for existing customer */}
@@ -2330,6 +2415,7 @@ function PhoneConsultModal({
          const cleanPhone = regPhone.replace(/\D/g, '');
          const cleanCpf = regCpf.replace(/\D/g, '');
          
+         /* REMOVIDO PARA PERMITIR DUPLICIDADE DE TELEFONE
          // Verificar se telefone já existe
          const { data: phoneCheck } = await supabase
             .from('customers')
@@ -2342,6 +2428,7 @@ function PhoneConsultModal({
             setRegLoading(false);
             return;
          }
+         */
          
          // Verificar CPF
          const { data: cpfCheck } = await supabase
@@ -2358,11 +2445,11 @@ function PhoneConsultModal({
          
          const { data, error } = await supabase
             .from('customers')
-            .upsert({
+            .insert({
                name: regName.toUpperCase(),
                phone: cleanPhone,
                cpf: cleanCpf
-            }, { onConflict: 'phone' })
+            })
             .select()
             .single();
             
